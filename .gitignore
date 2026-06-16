@@ -1,34 +1,46 @@
-# Dependencies
+# Node.js
 node_modules/
-.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json.bak
 
-# Expo
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Expo / React Native
 .expo/
 .expo-shared/
+web-build/
 dist/
 
-# Build artifacts
-android/build/
+# Android
+**/build/
+**/.gradle/
+**/local.properties
+**/*.apk
+**/*.aab
+**/*.ap_
+**/*.dex
+**/*.class
+**/.cxx/
+**/.kotlin/
+captures/
+.externalNativeBuild
+*.keystore
+!debug.keystore
+
+# iOS (just in case)
+ios/Pods/
 ios/build/
-*.apk
-*.ipa
-app-release.apk
-
-# Logs
-npm-debug.log*
-yarn-error.log*
-lerna-debug.log*
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# OS files
-.DS_Store
-Thumbs.db
 
 # IDE
 .vscode/
@@ -36,6 +48,29 @@ Thumbs.db
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
 
-# TypeScript
-*.tsbuildinfo
+# Temp / Logs
+temp/
+*.log
+*.tmp
+
+# 测试文件
+test_response.html
+detail_page.html
+test_*.py.bak
+
+# Misc
+flutter.zip
+*.zip
+*.tar.gz
+
+# 启动脚本（包含绝对路径，避免泄漏）
+start_crawler_silent.bat
+start_crawler_silent.vbs
+取消开机自启.bat
+启动爬虫.bat
+恢复自动获取IP.bat
+设为开机自启.bat
+设置静态IP.bat
