@@ -24,13 +24,13 @@ import * as pendingBomImport from './src/utils/pendingBomImport';
 
 const FETCH_TIMEOUT_MS = 30000;
 
-const fetchWithTimeout = (uri, options = {}) => {
+const fetchWithTimeout = (uri: string, options: RequestInit = {}): Promise<Response> => {
   return Promise.race([
     fetch(uri, options),
-    new Promise((_, reject) =>
+    new Promise<Response>((_, reject) =>
       setTimeout(() => reject(new Error('读取文件超时')), FETCH_TIMEOUT_MS)
     ),
-  ]);
+  ]) as unknown as Promise<Response>;
 };
 
 /**
@@ -41,7 +41,7 @@ const fetchWithTimeout = (uri, options = {}) => {
  * @param {Uint8Array} bytes 原始字节
  * @returns {string} base64 字符串（无换行）
  */
-const encodeBytesToBase64 = (bytes) => {
+const encodeBytesToBase64 = (bytes: Uint8Array) => {
   const CHARS =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   const len = bytes.length;
@@ -76,7 +76,7 @@ const encodeBytesToBase64 = (bytes) => {
  * 用于 BOM 文件导入失败时排查华为/鸿蒙等特殊机型问题
  */
 const getDeviceDebugInfo = () => {
-  const constants = Platform.constants || {};
+  const constants: any = Platform.OS === 'android' ? Platform.constants || {} : {};
   // 鸿蒙 4.x 走 AOSP 兼容层，Platform.OS = 'android'
   // 鸿蒙 NEXT 不兼容 Android 应用（装不上）
   return {
@@ -97,7 +97,7 @@ const getDeviceDebugInfo = () => {
  *   - file:///...（部分系统直接传递的本地文件路径）
  *   - 也有可能以 exp+stabledeviceapp 之类的 scheme 出现（保留给 deep link）
  */
-const isImportableFileUrl = (url) => {
+const isImportableFileUrl = (url: string) => {
   if (!url) return false;
   if (url.startsWith('content://')) return true;
   if (url.startsWith('file://')) return true;
@@ -109,7 +109,7 @@ const isImportableFileUrl = (url) => {
  * 判断 URL 是否为可处理的 BOM Excel 文件 URI
  * 支持 .xlsx / .xls / .csv 格式
  */
-const isImportableBomUrl = (url) => {
+const isImportableBomUrl = (url: string) => {
   if (!url) return false;
   if (!url.startsWith('content://') && !url.startsWith('file://')) return false;
   return /\.(xlsx|xls|csv)(\?|$)/i.test(url);
@@ -120,7 +120,7 @@ const isImportableBomUrl = (url) => {
  * 微信等应用分享时可能附带 displayName 查询参数（带 URL 编码的原始文件名），
  * 优先从 query 中取 displayName，否则取路径最后一段
  */
-const extractFileName = (url) => {
+const extractFileName = (url: string) => {
   try {
     // 优先尝试从 query 中取 displayName（微信 FileProvider 通常带此参数）
     const queryIndex = url.indexOf('?');
@@ -148,15 +148,15 @@ const extractFileName = (url) => {
 
 export default function App() {
   // 待导入文件 URI（来自外部应用分享）
-  const [pendingImportUri, setPendingImportUri] = useState(null);
+  const [pendingImportUri, setPendingImportUri] = useState<string | null>(null);
   // 待导入文件名（用于在弹窗中展示）
-  const [pendingImportName, setPendingImportName] = useState('');
+  const [pendingImportName, setPendingImportName] = useState<string>('');
   // 导入进行中状态
   const [isImporting, setIsImporting] = useState(false);
   // 待导入的 BOM Excel 文件 URI（来自微信等应用分享）
-  const [pendingBomUri, setPendingBomUri] = useState(null);
+  const [pendingBomUri, setPendingBomUri] = useState<string | null>(null);
   // 待导入 BOM 文件名
-  const [pendingBomName, setPendingBomName] = useState('');
+  const [pendingBomName, setPendingBomName] = useState<string>('');
   // BOM 导入进行中状态
   const [isBomImporting, setIsBomImporting] = useState(false);
 
@@ -167,7 +167,7 @@ export default function App() {
    *   - .json → 数据备份导入
    * @param {string} url - 其他应用通过 Intent 传入的 URI
    */
-  const handleIncomingUrl = (url) => {
+  const handleIncomingUrl = (url: string) => {
     if (!url) return;
     console.log('[App] 收到外部应用传入的 URL:', url);
 
@@ -213,7 +213,7 @@ export default function App() {
    * @param {string} uri - 文件 URI（content:// 或 file://）
    * @returns {Promise<string>} 文件内容
    */
-  const readImportFile = async (uri) => {
+  const readImportFile = async (uri: string) => {
     if (!uri) throw new Error('文件 URI 为空');
 
     // 1) 优先用 fetch() 读取：React Native Android 的 fetch 底层走 OkHttp，
@@ -226,7 +226,7 @@ export default function App() {
       }
       return await response.text();
     } catch (fetchErr) {
-      logError('fetch 读取失败，尝试 Expo 新 API', fetchErr, 'App.readImportFile');
+      logError('fetch 读取失败，尝试 Expo 新 API', fetchErr as Error, 'App.readImportFile');
 
       // 2) fetch 失败时回退到 expo-file-system 新 API
       const normalized = uri.startsWith('file://') || uri.startsWith('content://')
@@ -273,11 +273,11 @@ export default function App() {
         ]
       );
     } catch (error) {
-      logError('从外部应用导入数据失败', error, 'App.handleConfirmImport');
+      logError('从外部应用导入数据失败', error as Error, 'App.handleConfirmImport');
       setIsImporting(false);
       Alert.alert(
         '导入失败',
-        `无法导入文件：${error.message || '请检查文件格式是否为合法的数据备份'}\n\n请使用本 App 内"我的 → 数据导入"功能重新选择文件。`,
+        `无法导入文件：${(error as Error).message || '请检查文件格式是否为合法的数据备份'}\n\n请使用本 App 内"我的 → 数据导入"功能重新选择文件。`,
         [{ text: '确定' }]
       );
     }
@@ -370,19 +370,20 @@ export default function App() {
 
       // 6) 跳转到 BOM tab（无论是否已在 BOM tab，都会触发 navigation state 变化）
       if (navigationRef.isReady()) {
-        navigationRef.navigate('MainTabs', { screen: 'BOM' });
+        (navigationRef as any).navigate('MainTabs', { screen: 'BOM' });
         console.log('[BOM-FLOW] step6: navigate to BOM tab');
       } else {
         console.warn('[BOM-FLOW] step6: navigationRef not ready, skip navigate');
       }
       console.log('[BOM-FLOW] ========== BOM 文件处理成功 ==========');
     } catch (err) {
+      const e = err as Error;
       console.error('[BOM-FLOW] ========== BOM 文件处理失败 ==========');
       console.error('[BOM-FLOW] 设备信息:', JSON.stringify(deviceInfo));
       console.error('[BOM-FLOW] 失败 URI:', pendingBomUri);
-      console.error('[BOM-FLOW] 错误信息:', err.message);
-      console.error('[BOM-FLOW] 错误堆栈:', err.stack);
-      logError('BOM 文件导入失败', err, 'App.handleConfirmBomImport');
+      console.error('[BOM-FLOW] 错误信息:', e.message);
+      console.error('[BOM-FLOW] 错误堆栈:', e.stack);
+      logError('BOM 文件导入失败', e, 'App.handleConfirmBomImport');
 
       // 针对华为/鸿蒙机型的友好提示
       const isHuaweiHint = deviceInfo.isHuawei
@@ -391,7 +392,7 @@ export default function App() {
 
       Alert.alert(
         '导入失败',
-        `无法导入 BOM 文件：${err.message || '请检查文件格式是否为合法的 Excel 配单'}${isHuaweiHint}`,
+        `无法导入 BOM 文件：${(e as Error).message || '请检查文件格式是否为合法的 Excel 配单'}${isHuaweiHint}`,
         [{ text: '确定' }]
       );
     } finally {
