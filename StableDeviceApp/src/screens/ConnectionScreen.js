@@ -276,7 +276,21 @@ const ConnectionScreen = ({ navigation }) => {
       const sorted = sortDevicesByRssi(devices);
       setAvailableDevices(sorted);
       if (sorted.length === 0) {
-        Alert.alert('提示', '未发现蓝牙设备，请确保设备已开启');
+        // 2 秒未扫到任何信号强度 ≥ -90dBm 的设备，提供重扫选项
+        Alert.alert(
+          '未发现蓝牙设备',
+          '2 秒内未扫描到信号强度足够的设备（RSSI ≥ -90dBm）。\n请确保设备已开启且距离较近。',
+          [
+            { text: '取消', style: 'cancel' },
+            {
+              text: '重新扫描',
+              onPress: () => {
+                // 用户主动重扫：再次调用扫描
+                scanForBluetoothDevices();
+              },
+            },
+          ]
+        );
       }
     } catch (error) {
       console.error('扫描蓝牙设备失败:', error);
@@ -304,8 +318,6 @@ const ConnectionScreen = ({ navigation }) => {
       const detectedBaud = bluetoothHandler.getCurrentBaudRate();
       setBaudRate(detectedBaud);
       console.log('检测到的波特率:', detectedBaud);
-
-      Alert.alert('成功', `已连接到设备: ${device.name}\n波特率: ${detectedBaud}\n心跳验证通过`);
 
       global.deviceConnection = {
         type: 'bluetooth',

@@ -25,6 +25,8 @@ import {
 import * as DocumentPicker from 'expo-document-picker';  // 文件选择器
 import * as FileSystem from 'expo-file-system/legacy';   // 文件系统操作
 import * as Sharing from 'expo-sharing';                 // 分享功能
+import * as Clipboard from 'expo-clipboard';             // 剪贴板（用于复制导出路径）
+import * as ExpoEasyFs from 'expo-easy-fs';              // 下载目录读写（Android 10+ 走 MediaStore）
 import StorageService from '../services/StorageService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { useUser } from '../context/UserContext';
@@ -42,6 +44,10 @@ const ProfileScreen = ({ navigation, route }) => {
   // 数据导出相关状态
   const [exportFileName, setExportFileName] = useState(''); // 导出文件名
   const [showExportModal, setShowExportModal] = useState(false); // 是否显示导出弹窗
+  // 导出成功弹窗信息（null 表示不显示）
+  const [exportSuccessInfo, setExportSuccessInfo] = useState(null);
+  // 复制按钮反馈状态
+  const [pathCopied, setPathCopied] = useState(false);
 
   /**
    * 组件挂载时初始化用户信息
@@ -90,16 +96,109 @@ const ProfileScreen = ({ navigation, route }) => {
   };
 
   /**
+   * 关闭操作面板：取消导出
+   * 清理文档目录的中间文件，避免无意义占用空间
+   */
+  const handleCloseExportSuccess = async () => {
+    const path = exportSuccessInfo?.documentPath;
+    if (path) {
+      try {
+        await FileSystem.deleteAsync(path, { idempotent: true });
+      } catch (e) {
+        // 清理失败不影响关闭
+      }
+    }
+    setExportSuccessInfo(null);
+    setPathCopied(false);
+  };
+
+  /**
+   * 复制导出文件路径到系统剪贴板
+   * 复制成功时按钮短暂显示"已复制"
+   */
+  const handleCopyExportPath = async () => {
+    if (!exportSuccessInfo?.androidVisiblePath) return;
+    try {
+      await Clipboard.setStringAsync(exportSuccessInfo.androidVisiblePath);
+      setPathCopied(true);
+      // 2 秒后自动恢复按钮文字
+      setTimeout(() => setPathCopied(false), 2000);
+    } catch (err) {
+      logError('复制导出路径失败', err, 'ProfileScreen.handleCopyExportPath');
+      Alert.alert('错误', '复制失败，请手动选择路径文字复制');
+    }
+  };
+
+  /**
+   * 「分享」按钮：唤起系统分享面板
+   * 注意：不能在 shareAsync 之前清理文件，否则分享面板找不到文件
+   * 分享面板关闭后（无论是否真的分享了）再清理中间文件
+   */
+  const handleShareFromSuccess = async () => {
+    if (!exportSuccessInfo?.documentPath) return;
+    const { documentPath, fileName } = exportSuccessInfo;
+
+    // 根据文件扩展名自动选择正确的 MIME
+    // 微信好友分享限制：
+    //   ✅ 接受：image/*, video/*, pdf, doc(x), xls(x), ppt(x), txt
+    //   ❌ 拒绝：json（任何手机都会被拒，这是微信策略）
+    //
+    // ⚠️ 重要：json 不用 application/json，原因：
+    //   华为/鸿蒙对 Intent 中的 application/json MIME 有系统级白名单过滤，
+    //   即使 OPPO/Vivo/小米/三星 能正常分享 json，
+    //   华为手机会在系统层拦截，微信收不到文件 → 显示"暂不支持分享"。
+    //   改用 text/plain 后，所有 Android OEM 厂商都会放行。
+    const ext = fileName.toLowerCase().split('.').pop() || '';
+    const mimeMap = {
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      xls: 'application/vnd.ms-excel',
+      csv: 'text/csv',
+      txt: 'text/plain',
+      pdf: 'application/pdf',
+      // 关键：json 用 text/plain 而不是 application/json，绕过华为 MIME 拦截
+      json: 'text/plain',
+    };
+    const mimeType = mimeMap[ext] || 'application/octet-stream';
+
+    // 先关闭操作面板，再唤起分享面板（避免遮挡）
+    setExportSuccessInfo(null);
+    setPathCopied(false);
+    try {
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(documentPath, {
+          mimeType,
+          dialogTitle: `分享 ${fileName}`,
+          UTI: ext === 'json' ? 'public.json' : undefined,
+        });
+      } else {
+        Alert.alert('提示', '当前设备不支持分享功能');
+      }
+    } catch (err) {
+      logError('主动分享失败', err, 'ProfileScreen.handleShareFromSuccess');
+      Alert.alert('错误', `分享失败：${err.message || '请重试'}`);
+    } finally {
+      // 无论分享成功/失败/取消，都清理中间文件
+      try {
+        await FileSystem.deleteAsync(documentPath, { idempotent: true });
+      } catch (e) {
+        // 忽略
+      }
+    }
+  };
+
+  /**
    * 执行数据导出操作
-   * 
+   *
    * 流程：
    * 1. 验证文件名不为空
    * 2. 从存储服务导出所有数据（器件、BOM、分类等）
    * 3. 将数据序列化为JSON格式
-   * 4. 写入缓存目录
-   * 5. 通过系统分享界面让用户选择保存位置
-   * 6. 显示导出摘要信息
-   * 7. 清理临时缓存文件
+   * 4. 先写入应用文档目录（用于分享功能，不删除）
+   * 5. 再复制到公共下载目录（expo-easy-fs 走 MediaStore 适配 Android 10+ scoped storage）
+   * 6. 弹出"导出成功"操作面板：展示默认下载路径+复制+分享+完成按钮
+   * 7. 不主动唤起系统分享面板——避免 expo-sharing 在 Android 上无法区分
+   *    "用户分享"与"切后台"导致误判为"导出成功"的体验问题
+   * 8. 文件已保存到下载目录，用户可随时通过面板里的「分享」按钮主动唤起分享
    */
   const handleExportData = async () => {
     // 验证文件名
@@ -117,56 +216,42 @@ const ProfileScreen = ({ navigation, route }) => {
       // 确保文件名以.json结尾
       const fileName = exportFileName.endsWith('.json') ? exportFileName : `${exportFileName}.json`;
 
-      // 先写入应用缓存目录
-      const cachePath = `${FileSystem.cacheDirectory}${fileName}`;
-      await FileSystem.writeAsStringAsync(cachePath, backupJson);
+      // 写入应用文档目录作为中间文件（供「确认」/「分享」使用）
+      // 注意：此时还没写入下载目录，文件仅存在 app 内部
+      const documentPath = `${FileSystem.documentDirectory}${fileName}`;
+      await FileSystem.writeAsStringAsync(documentPath, backupJson);
 
-      // 关闭弹窗并清空文件名
+      // 关闭文件名输入弹窗
       setShowExportModal(false);
       setExportFileName('');
 
-      // 组装导出摘要信息
-      const summary = backupData.summary || {};
-      const summaryText = [
-        `器件: ${summary.deviceCount ?? 0} 个`,
-        `BOM: ${summary.bomCount ?? 0} 个`,
-        `分类: ${summary.categoryCount ?? 0} 大类 / ${summary.subCategoryCount ?? 0} 子类目`,
-        summary.isCustomCategories ? '(已包含您自定义的类目)' : '(使用默认类目)',
-      ].join('\n');
-
-      // 通过系统分享/保存界面，让用户选择保存位置
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(cachePath, {
-          mimeType: 'application/json',
-          dialogTitle: '保存导出数据',
-          UTI: 'public.json',
-        });
-        // 分享弹窗关闭后展示导出内容摘要
-        Alert.alert(
-          '数据导出成功',
-          `文件: ${fileName}\n导出时间: ${backupData.exportDate}\n\n${summaryText}\n\n请将文件通过文件管理/微信等方式传到另一台手机，使用"数据导入"功能即可使用。`,
-          [{ text: '确定' }]
-        );
-      } else {
-        // 不支持分享时，保存到默认文档目录
-        const docPath = `${FileSystem.documentDirectory}${fileName}`;
-        await FileSystem.writeAsStringAsync(docPath, backupJson);
-        Alert.alert(
-          '数据导出',
-          `导出成功！\n\n文件: ${fileName}\n导出时间: ${backupData.exportDate}\n\n${summaryText}`,
-          [{ text: '确定' }]
-        );
-      }
-
-      // 清理缓存文件
-      try {
-        await FileSystem.deleteAsync(cachePath);
-      } catch (e) {
-        // 忽略清理失败
-      }
+      // 弹出"操作面板"，等待用户选择如何保存
+      // androidVisiblePath 显示"将要保存到"的默认下载路径
+      setExportSuccessInfo({
+        fileName,
+        androidVisiblePath: `Download/${fileName}`,
+        documentPath,
+      });
     } catch (error) {
-      logError('导出数据失败', error, 'ProfileScreen.handleExportData');
+      logError('准备导出数据失败', error, 'ProfileScreen.handleExportData');
       Alert.alert('错误', `导出数据失败: ${error.message || '请重试'}`);
+    }
+  };
+
+  /**
+   * 「确认」按钮：写入到默认下载目录
+   * expo-easy-fs 的 copyFileToDownload 内部走 MediaStore，兼容 Android 10+ scoped storage
+   */
+  const handleConfirmExport = async () => {
+    if (!exportSuccessInfo?.documentPath) return;
+    const { documentPath, fileName } = exportSuccessInfo;
+    try {
+      await ExpoEasyFs.copyFileToDownload(documentPath, fileName);
+      Alert.alert('成功', `文件已保存到 Download/${fileName}`);
+      handleCloseExportSuccess();
+    } catch (err) {
+      logError('保存到下载目录失败', err, 'ProfileScreen.handleConfirmExport');
+      Alert.alert('错误', `保存到下载目录失败：${err.message || '请重试'}`);
     }
   };
 
@@ -220,20 +305,10 @@ const ProfileScreen = ({ navigation, route }) => {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>个人中心</Text>
+        <Text style={styles.headerTitle}>设置</Text>
       </View>
 
       <ScrollView style={styles.content}>
-        <View style={styles.userInfoContainer}>
-          <View style={styles.avatarContainer}>
-            <Text style={styles.avatarText}>
-              {userInfo.username.charAt(0).toUpperCase()}
-            </Text>
-          </View>
-          <Text style={styles.username}>{userInfo.username}</Text>
-          <Text style={styles.role}>{userInfo.role}</Text>
-        </View>
-
         <View style={styles.menuContainer}>
           <TouchableOpacity style={styles.menuItem} onPress={handleOpenCategoryManagement}>
             <Text style={styles.menuText}>分类管理</Text>
@@ -303,6 +378,61 @@ const ProfileScreen = ({ navigation, route }) => {
             </View>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* 导出成功提示弹窗（精简版：仅路径+复制+两个操作按钮） */}
+      <Modal
+        visible={!!exportSuccessInfo}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={handleCloseExportSuccess}
+      >
+        <View style={styles.successOverlay}>
+          <View style={styles.successContent}>
+            {/* 文件保存路径 + 复制按钮 */}
+            <View style={styles.pathBox}>
+              <Text style={styles.infoLabel}>文件保存路径</Text>
+              <View style={styles.pathRow}>
+                <Text
+                  style={styles.pathValue}
+                  numberOfLines={2}
+                  ellipsizeMode="middle"
+                >
+                  {exportSuccessInfo?.androidVisiblePath}
+                </Text>
+                <TouchableOpacity
+                  style={[
+                    styles.copyButton,
+                    pathCopied && styles.copyButtonDone,
+                  ]}
+                  onPress={handleCopyExportPath}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.copyButtonText}>
+                    {pathCopied ? '已复制' : '复制'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.successButtonRow}>
+              <TouchableOpacity
+                style={[styles.successActionButton, styles.shareButton]}
+                onPress={handleShareFromSuccess}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.shareButtonText}>分享</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.successActionButton, styles.successOkButton]}
+                onPress={handleConfirmExport}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.successOkButtonText}>确认</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
       </Modal>
     </SafeAreaView>
   );
@@ -455,6 +585,133 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#999',
     marginTop: 8,
+  },
+  // ===== 导出成功弹窗样式 =====
+  successOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  successContent: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 20,
+    width: '100%',
+    maxWidth: 400,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+  },
+  successHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  successIcon: {
+    fontSize: 24,
+    color: '#007AFF',
+    fontWeight: 'bold',
+    marginRight: 8,
+  },
+  successTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  infoBox: {
+    backgroundColor: '#f5f5f7',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
+  },
+  infoLabel: {
+    fontSize: 12,
+    color: '#999',
+    marginBottom: 4,
+  },
+  infoValue: {
+    fontSize: 13,
+    color: '#333',
+    lineHeight: 18,
+  },
+  pathBox: {
+    backgroundColor: '#e8f0fe',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  pathRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  pathValue: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1976d2',
+    fontWeight: '500',
+    marginRight: 8,
+    lineHeight: 18,
+  },
+  copyButton: {
+    backgroundColor: '#1976d2',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 6,
+    minWidth: 60,
+    alignItems: 'center',
+  },
+  copyButtonDone: {
+    backgroundColor: '#2e7d32',
+  },
+  copyButtonText: {
+    color: 'white',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  successTip: {
+    fontSize: 12,
+    color: '#666',
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  successOkButton: {
+    backgroundColor: '#007AFF',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    flex: 1,
+  },
+  successOkButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  successButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  successActionButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shareButton: {
+    backgroundColor: '#34c759',
+    marginRight: 8,
+  },
+  shareButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 });
 

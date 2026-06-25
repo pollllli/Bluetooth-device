@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,10 @@ import {
   Alert,
   TextInput,
   Modal,
-  KeyboardAvoidingView,
+  Pressable,
   Platform,
   SafeAreaView,
+  Keyboard,
 } from 'react-native';
 import {
   getCategories,
@@ -25,6 +26,7 @@ import {
   isDefaultSubCategory,
 } from '../services/DeviceCategoryService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
+import { Feather } from '@expo/vector-icons';
 
 /**
  * 分类管理页面组件
@@ -62,6 +64,49 @@ const CategoryManagementScreen = ({ navigation }) => {
   const [renameSubTarget, setRenameSubTarget] = useState(null);         // { bigName, oldSub }
   const [renameSubInput, setRenameSubInput] = useState('');             // 新子类目名称
 
+  // 4 个弹窗的 TextInput 引用（用于延迟 focus，避免弹窗动画与键盘弹起并发导致的"抽搐"）
+  const bigInputRef = useRef(null);
+  const subInputRef = useRef(null);
+  const renameBigInputRef = useRef(null);
+  const renameSubInputRef = useRef(null);
+
+  /**
+   * 关闭弹窗的统一入口。
+   *
+   * 关键：先调用 Keyboard.dismiss() 立即收起键盘（同步、无动画），
+   * 再 setState 关闭弹窗。这样：
+   *   1. 键盘消失是**瞬间**的（不是 200-300ms 的系统动画）
+   *   2. 弹窗 fadeOut 动画和键盘消失完全**串行**进行
+   *   3. adjustResize 触发的高度变化在 setState 之前已完成
+   *   → 杜绝"键盘收起 + 弹窗关闭"并发导致的抽搐
+   */
+  const closeAddBig = useCallback(() => {
+    Keyboard.dismiss();
+    setBigInput('');
+    setShowAddBigModal(false);
+  }, []);
+
+  const closeAddSub = useCallback(() => {
+    Keyboard.dismiss();
+    setSubInput('');
+    setAddSubTarget(null);
+    setShowAddSubModal(false);
+  }, []);
+
+  const closeRenameBig = useCallback(() => {
+    Keyboard.dismiss();
+    setRenameBigTarget(null);
+    setRenameBigInput('');
+    setShowRenameBigModal(false);
+  }, []);
+
+  const closeRenameSub = useCallback(() => {
+    Keyboard.dismiss();
+    setRenameSubTarget(null);
+    setRenameSubInput('');
+    setShowRenameSubModal(false);
+  }, []);
+
   // 加载类目数据
   const loadCategories = useCallback(async () => {
     try {
@@ -76,6 +121,57 @@ const CategoryManagementScreen = ({ navigation }) => {
   useEffect(() => {
     loadCategories();
   }, [loadCategories]);
+
+  /**
+   * 延迟聚焦逻辑：弹窗打开 → 等待动画完成（300ms）→ 再触发 focus + 弹键盘
+   * 这是修复"抽搐"的关键。原先使用 autoFocus={true} 会导致：
+   *   - 弹窗开始 slide 动画（同一帧）
+   *   - TextInput 立即 focus 触发键盘弹起
+   *   - KeyboardAvoidingView 立即重新计算布局
+   *   - 三个事件并发 → 在某些机型（特别是带刘海/高刷屏的 OPPO/Vivo/小米）上
+   *     出现 50-200ms 的"抽搐"
+   *
+   * 解决方案：
+   *   1. 改用 fade 动画（无 slide 位移，触发的重排少）
+   *   2. 移除 KeyboardAvoidingView（manifest 已配 adjustResize，Android 自动处理键盘）
+   *   3. 延迟 focus 到动画完成后（setTimeout 350ms，保证 fade 动画结束）
+   *   4. 在 Modal 上加 statusBarTranslucent 防止状态栏跳动
+   */
+  useEffect(() => {
+    if (showAddBigModal) {
+      const timer = setTimeout(() => {
+        bigInputRef.current?.focus();
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [showAddBigModal]);
+
+  useEffect(() => {
+    if (showAddSubModal) {
+      const timer = setTimeout(() => {
+        subInputRef.current?.focus();
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [showAddSubModal]);
+
+  useEffect(() => {
+    if (showRenameBigModal) {
+      const timer = setTimeout(() => {
+        renameBigInputRef.current?.focus();
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [showRenameBigModal]);
+
+  useEffect(() => {
+    if (showRenameSubModal) {
+      const timer = setTimeout(() => {
+        renameSubInputRef.current?.focus();
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [showRenameSubModal]);
 
   // 打开"新增大分类"弹窗
   const handleOpenAddBig = () => {
@@ -93,8 +189,7 @@ const CategoryManagementScreen = ({ navigation }) => {
     try {
       const newList = await addBigCategory(name);
       setCategories(newList);
-      setBigInput('');
-      setShowAddBigModal(false);
+      closeAddBig();
     } catch (error) {
       Alert.alert('错误', formatErrorMessage(error));
     }
@@ -117,9 +212,7 @@ const CategoryManagementScreen = ({ navigation }) => {
     try {
       const newList = await addSubCategory(addSubTarget, subName);
       setCategories(newList);
-      setSubInput('');
-      setShowAddSubModal(false);
-      setAddSubTarget(null);
+      closeAddSub();
     } catch (error) {
       Alert.alert('错误', formatErrorMessage(error));
     }
@@ -191,17 +284,13 @@ const CategoryManagementScreen = ({ navigation }) => {
     }
     if (newName === renameBigTarget) {
       // 没变化，直接关闭
-      setShowRenameBigModal(false);
-      setRenameBigTarget(null);
-      setRenameBigInput('');
+      closeRenameBig();
       return;
     }
     try {
       const newList = await renameBigCategory(renameBigTarget, newName);
       setCategories(newList);
-      setShowRenameBigModal(false);
-      setRenameBigTarget(null);
-      setRenameBigInput('');
+      closeRenameBig();
     } catch (error) {
       Alert.alert('错误', formatErrorMessage(error));
     }
@@ -222,9 +311,7 @@ const CategoryManagementScreen = ({ navigation }) => {
       return;
     }
     if (newSub === renameSubTarget?.oldSub) {
-      setShowRenameSubModal(false);
-      setRenameSubTarget(null);
-      setRenameSubInput('');
+      closeRenameSub();
       return;
     }
     try {
@@ -234,9 +321,7 @@ const CategoryManagementScreen = ({ navigation }) => {
         newSub
       );
       setCategories(newList);
-      setShowRenameSubModal(false);
-      setRenameSubTarget(null);
-      setRenameSubInput('');
+      closeRenameSub();
     } catch (error) {
       Alert.alert('错误', formatErrorMessage(error));
     }
@@ -297,20 +382,22 @@ const CategoryManagementScreen = ({ navigation }) => {
                     <Text style={styles.defaultBadge}>默认</Text>
                   )}
                 </TouchableOpacity>
-                {/* 默认大类不显示任何操作按钮；用户新增的大类显示 [编辑] [🗑] */}
+                {/* 默认大类不显示任何操作按钮；用户新增的大类显示 [✏️] [🗑]（灰色极简图标，无背景） */}
                 {!isDefaultBig && (
                   <View style={styles.actionButtonsRow}>
                     <TouchableOpacity
-                      style={[styles.iconButton, styles.editButton]}
+                      style={styles.iconButton}
                       onPress={() => handleOpenRenameBig(cat.name)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     >
-                      <Text style={styles.editButtonText}>编辑</Text>
+                      <Feather name="edit-2" size={18} color="#999" />
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[styles.iconButton, styles.trashButton]}
+                      style={styles.iconButton}
                       onPress={() => handleDeleteBig(cat.name)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     >
-                      <Text style={styles.trashButtonText}>🗑</Text>
+                      <Feather name="trash-2" size={18} color="#999" />
                     </TouchableOpacity>
                   </View>
                 )}
@@ -337,20 +424,22 @@ const CategoryManagementScreen = ({ navigation }) => {
                               <Text style={styles.defaultSubBadge}>默认</Text>
                             )}
                           </View>
-                          {/* 默认子类目不显示任何操作按钮；用户新增的子类目显示 [编辑] [🗑] */}
+                          {/* 默认子类目不显示任何操作按钮；用户新增的子类目显示 [✏️] [🗑]（灰色极简图标，无背景） */}
                           {!isDefaultSub && (
                             <View style={styles.subActionRow}>
                               <TouchableOpacity
-                                style={[styles.smallIconButton, styles.editButton]}
+                                style={styles.smallIconButton}
                                 onPress={() => handleOpenRenameSub(cat.name, sub)}
+                                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                               >
-                                <Text style={styles.editButtonText}>编辑</Text>
+                                <Feather name="edit-2" size={16} color="#999" />
                               </TouchableOpacity>
                               <TouchableOpacity
-                                style={[styles.smallIconButton, styles.trashButton]}
+                                style={styles.smallIconButton}
                                 onPress={() => handleDeleteSub(cat.name, sub)}
+                                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                               >
-                                <Text style={styles.trashButtonText}>🗑</Text>
+                                <Feather name="trash-2" size={16} color="#999" />
                               </TouchableOpacity>
                             </View>
                           )}
@@ -400,180 +489,185 @@ const CategoryManagementScreen = ({ navigation }) => {
       {/* 新增大分类弹窗 */}
       <Modal
         visible={showAddBigModal}
-        animationType="slide"
+        animationType="fade"
         transparent={true}
-        onRequestClose={() => setShowAddBigModal(false)}
+        statusBarTranslucent={true}
+        onRequestClose={closeAddBig}
       >
-        <KeyboardAvoidingView
+        <Pressable
           style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          onPress={closeAddBig}
         >
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>新增大分类</Text>
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>大分类名称</Text>
-              <TextInput
-                style={styles.fileNameInput}
-                value={bigInput}
-                onChangeText={setBigInput}
-                placeholder="请输入大分类名称"
-                autoFocus={true}
-                maxLength={20}
-              />
+          {/* 阻止点击穿透到外层 Pressable */}
+          <Pressable onPress={() => {}} style={styles.modalInnerPressable}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>新增大分类</Text>
+              <View style={styles.inputContainer}>
+                <Text style={styles.inputLabel}>大分类名称</Text>
+                <TextInput
+                  ref={bigInputRef}
+                  style={styles.fileNameInput}
+                  value={bigInput}
+                  onChangeText={setBigInput}
+                  placeholder="请输入大分类名称"
+                  maxLength={20}
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmitAddBig}
+                />
+              </View>
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.cancelButton]}
+                  onPress={closeAddBig}
+                >
+                  <Text style={styles.cancelButtonText}>取消</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.submitButton]}
+                  onPress={handleSubmitAddBig}
+                >
+                  <Text style={styles.submitButtonText}>确定</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={() => {
-                  setShowAddBigModal(false);
-                  setBigInput('');
-                }}
-              >
-                <Text style={styles.cancelButtonText}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.submitButton]}
-                onPress={handleSubmitAddBig}
-              >
-                <Text style={styles.submitButtonText}>确定</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* 新增子类目弹窗 */}
       <Modal
         visible={showAddSubModal}
-        animationType="slide"
+        animationType="fade"
         transparent={true}
-        onRequestClose={() => setShowAddSubModal(false)}
+        statusBarTranslucent={true}
+        onRequestClose={closeAddSub}
       >
-        <KeyboardAvoidingView
+        <Pressable
           style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          onPress={closeAddSub}
         >
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>新增子类目</Text>
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>
-                所属大分类：{addSubTarget}
-              </Text>
-              <TextInput
-                style={styles.fileNameInput}
-                value={subInput}
-                onChangeText={setSubInput}
-                placeholder="请输入子类目名称"
-                autoFocus={true}
-                maxLength={40}
-              />
+          <Pressable onPress={() => {}} style={styles.modalInnerPressable}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>新增子类目</Text>
+              <View style={styles.inputContainer}>
+                <Text style={styles.inputLabel}>
+                  所属大分类：{addSubTarget}
+                </Text>
+                <TextInput
+                  ref={subInputRef}
+                  style={styles.fileNameInput}
+                  value={subInput}
+                  onChangeText={setSubInput}
+                  placeholder="请输入子类目名称"
+                  maxLength={40}
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmitAddSub}
+                />
+              </View>
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.cancelButton]}
+                  onPress={closeAddSub}
+                >
+                  <Text style={styles.cancelButtonText}>取消</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.submitButton]}
+                  onPress={handleSubmitAddSub}
+                >
+                  <Text style={styles.submitButtonText}>确定</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={() => {
-                  setShowAddSubModal(false);
-                  setSubInput('');
-                  setAddSubTarget(null);
-                }}
-              >
-                <Text style={styles.cancelButtonText}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.submitButton]}
-                onPress={handleSubmitAddSub}
-              >
-                <Text style={styles.submitButtonText}>确定</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* 重命名大分类弹窗 */}
       <Modal
         visible={showRenameBigModal}
-        animationType="slide"
+        animationType="fade"
         transparent={true}
-        onRequestClose={() => setShowRenameBigModal(false)}
+        statusBarTranslucent={true}
+        onRequestClose={closeRenameBig}
       >
-        <KeyboardAvoidingView
+        <Pressable
           style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          onPress={closeRenameBig}
         >
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>编辑大分类</Text>
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>
-                原名称：{renameBigTarget}
-              </Text>
-              <TextInput
-                style={styles.fileNameInput}
-                value={renameBigInput}
-                onChangeText={setRenameBigInput}
-                placeholder="请输入新名称"
-                autoFocus={true}
-                maxLength={20}
-              />
+          <Pressable onPress={() => {}} style={styles.modalInnerPressable}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>编辑大分类</Text>
+              <View style={styles.inputContainer}>
+                <Text style={styles.inputLabel}>
+                  原名称：{renameBigTarget}
+                </Text>
+                <TextInput
+                  ref={renameBigInputRef}
+                  style={styles.fileNameInput}
+                  value={renameBigInput}
+                  onChangeText={setRenameBigInput}
+                  placeholder="请输入新名称"
+                  maxLength={20}
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmitRenameBig}
+                />
+              </View>
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.cancelButton]}
+                  onPress={closeRenameBig}
+                >
+                  <Text style={styles.cancelButtonText}>取消</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.submitButton]}
+                  onPress={handleSubmitRenameBig}
+                >
+                  <Text style={styles.submitButtonText}>确定</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={() => {
-                  setShowRenameBigModal(false);
-                  setRenameBigTarget(null);
-                  setRenameBigInput('');
-                }}
-              >
-                <Text style={styles.cancelButtonText}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.submitButton]}
-                onPress={handleSubmitRenameBig}
-              >
-                <Text style={styles.submitButtonText}>确定</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* 重命名子类目弹窗 */}
       <Modal
         visible={showRenameSubModal}
-        animationType="slide"
+        animationType="fade"
         transparent={true}
-        onRequestClose={() => setShowRenameSubModal(false)}
+        statusBarTranslucent={true}
+        onRequestClose={closeRenameSub}
       >
-        <KeyboardAvoidingView
+        <Pressable
           style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          onPress={closeRenameSub}
         >
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>编辑子类目</Text>
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>
-                所属大分类：{renameSubTarget?.bigName}
-                {'\n'}原名称：{renameSubTarget?.oldSub}
-              </Text>
-              <TextInput
-                style={styles.fileNameInput}
-                value={renameSubInput}
-                onChangeText={setRenameSubInput}
-                placeholder="请输入新名称"
-                autoFocus={true}
-                maxLength={40}
-              />
-            </View>
+          <Pressable onPress={() => {}} style={styles.modalInnerPressable}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>编辑子类目</Text>
+              <View style={styles.inputContainer}>
+                <Text style={styles.inputLabel}>
+                  所属大分类：{renameSubTarget?.bigName}
+                  {'\n'}原名称：{renameSubTarget?.oldSub}
+                </Text>
+                <TextInput
+                  ref={renameSubInputRef}
+                  style={styles.fileNameInput}
+                  value={renameSubInput}
+                  onChangeText={setRenameSubInput}
+                  placeholder="请输入新名称"
+                  maxLength={40}
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmitRenameSub}
+                />
+              </View>
             <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={() => {
-                  setShowRenameSubModal(false);
-                  setRenameSubTarget(null);
-                  setRenameSubInput('');
-                }}
-              >
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.cancelButton]}
+                  onPress={closeRenameSub}
+                >
                 <Text style={styles.cancelButtonText}>取消</Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -584,7 +678,8 @@ const CategoryManagementScreen = ({ navigation }) => {
               </TouchableOpacity>
             </View>
           </View>
-        </KeyboardAvoidingView>
+          </Pressable>
+        </Pressable>
       </Modal>
     </SafeAreaView>
   );
@@ -829,11 +924,39 @@ const styles = StyleSheet.create({
   },
 
   // 模态框样式
+  //
+  // 关键修复：使用 position: absolute + 固定 top 位置，让弹窗位置
+  // 不受键盘弹起/收起（adjustResize 触发的高度变化）影响。
+  //
+  // 旧版用 flex: 1 的问题：
+  //   1. 用户输入完毕点弹窗外 → 触发键盘收起（adjustResize 反向动画）
+  //   2. 同一帧，Pressable 触发关闭弹窗（setShowAddBigModal(false) → Modal fadeOut 动画）
+  //   3. modalOverlay 用 flex:1 → 高度随键盘收回而增大 → modalContent 位置向上跳
+  //   4. 三件事并发 → 在某些机型上看到 100-300ms 的"抽搐"或"界面抖动"
+  //
+  // 新版 position: absolute + 固定 top 50% + translateY 居中：
+  //   - modalOverlay 始终铺满整个 Modal 容器
+  //   - modalContent 用 transform 居中（不依赖 flex）
+  //   - 键盘弹起时整个 View 不再随高度变化重排
+  //   - 弹窗位置始终固定在屏幕中央
   modalOverlay: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  // 修复弹窗宽度跟随输入内容变化：
+  //   内层 Pressable（用于阻止点击穿透）必须显式指定 width: '100%'，
+  //   否则它是 shrink-to-fit 容器，宽度收缩到 modalContent 的内容宽度，
+  //   而 modalContent 的 width: '85%' 又相对父容器宽度计算 → 循环引用
+  //   → 实际宽度由 TextInput 内容字数决定（"逛"字时窄，10 字时宽）
+  modalInnerPressable: {
+    width: '100%',
   },
   modalContent: {
     backgroundColor: 'white',
@@ -841,6 +964,15 @@ const styles = StyleSheet.create({
     padding: 20,
     width: '85%',
     maxWidth: 400,
+    // 在 modalInnerPressable 内水平居中（modalInnerPressable 默认 alignItems: stretch，
+    // 子元素默认左对齐，加 alignSelf: 'center' 强制居中）
+    alignSelf: 'center',
+    // 固定 elevation 阴影，避免某些机型（特别是 OPPO/Vivo）在动画过程中阴影重绘造成的"抽搐"
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
   },
   modalTitle: {
     fontSize: 20,

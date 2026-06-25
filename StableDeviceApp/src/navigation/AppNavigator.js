@@ -1,11 +1,12 @@
 import React from 'react';
 import { Image, View, StyleSheet, TouchableOpacity, Text } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import DeviceListScreen from '../screens/DeviceListScreen';
 import DeviceDetailScreen from '../screens/DeviceDetailScreen';
 import AdminEditScreen from '../screens/AdminEditScreen';
+import NewDeviceScreen from '../screens/NewDeviceScreen';
 import BOMScreen from '../screens/BOMScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import ConnectionScreen from '../screens/ConnectionScreen';
@@ -15,6 +16,12 @@ import { useUser } from '../context/UserContext';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
+
+/**
+ * 全局导航引用：用于在 React 组件树之外执行导航操作
+ * （如 App.tsx 中收到外部应用分享的 JSON 文件后，导入成功时需跳回主页）
+ */
+export const navigationRef = createNavigationContainerRef();
 
 const sendLightOff = async () => {
   if (global.deviceConnection && global.deviceConnection.handler) {
@@ -105,7 +112,7 @@ const MainTabNavigator = () => {
       <Tab.Screen
         name="BOM"
         options={{
-          title: 'BOM配单',
+          title: 'BOM匹配',
           tabBarTestID: 'tab-bom',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bom.png')),
         }}
@@ -115,7 +122,7 @@ const MainTabNavigator = () => {
       <Tab.Screen
         name="Profile"
         options={{
-          title: '我的',
+          title: '设置',
           tabBarTestID: 'tab-profile',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/profile.png')),
         }}
@@ -147,7 +154,7 @@ const AppNavigator = () => {
   const isAdmin = user?.isAdmin || true;
 
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef}>
       <Stack.Navigator
         initialRouteName="MainTabs"
         screenOptions={{
@@ -201,6 +208,14 @@ const AppNavigator = () => {
             title: route.params?.isNew ? '上架器件' : '编辑器件',
             headerBackTitle: '返回',
           })}
+        />
+        <Stack.Screen
+          name="NewDevice"
+          component={NewDeviceScreen}
+          options={{
+            title: '新建器件',
+            headerBackTitle: '返回',
+          }}
         />
         <Stack.Screen
           name="ScanScreen"

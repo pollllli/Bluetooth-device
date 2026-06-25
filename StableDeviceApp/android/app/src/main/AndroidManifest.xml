@@ -33,6 +33,53 @@
         <category android:name="android.intent.category.BROWSABLE"/>
         <data android:scheme="exp+stabledeviceapp"/>
       </intent-filter>
+      <!-- 接收外部应用（微信、文件管理器等）分享的 JSON 数据备份文件 -->
+      <intent-filter android:label="导入数据">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="application/json"/>
+      </intent-filter>
+      <!-- 兼容：部分应用以 SEND 方式发送文件 -->
+      <intent-filter android:label="导入数据">
+        <action android:name="android.intent.action.SEND"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="application/json"/>
+      </intent-filter>
+      <!-- 接收外部应用（微信、文件管理器等）分享的 Excel BOM 配单文件 -->
+      <intent-filter android:label="导入BOM配单">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
+      </intent-filter>
+      <intent-filter android:label="导入BOM配单">
+        <action android:name="android.intent.action.SEND"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
+      </intent-filter>
+      <!-- 兼容旧版 xls 格式 -->
+      <intent-filter android:label="导入BOM配单">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="application/vnd.ms-excel"/>
+      </intent-filter>
+      <!-- 兼容 csv 格式（华为/鸿蒙对 csv 的解析与 AOSP 不一致，需要显式声明） -->
+      <intent-filter android:label="导入BOM配单">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="text/csv"/>
+      </intent-filter>
+      <!-- 兜底：所有 */* 类型文件（确保华为/鸿蒙的"打开方式"列表中始终能选到本 App） -->
+      <intent-filter android:label="导入文件">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="*/*"/>
+      </intent-filter>
+      <!-- 接收多个文件的 SEND_MULTIPLE（华为文件管理器可能用此 action） -->
+      <intent-filter android:label="导入文件">
+        <action android:name="android.intent.action.SEND"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="*/*"/>
+      </intent-filter>
     </activity>
   </application>
 </manifest>

@@ -32,9 +32,6 @@ import {
   SafeAreaView,
   Modal,
 } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';  // 文件选择器
-import * as FileSystem from 'expo-file-system/legacy';   // 文件系统操作
-import * as XLSX from 'xlsx';                           // Excel解析库
 import StorageService from '../services/StorageService';
 import BluetoothHandler from '../services/BluetoothHandler';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
@@ -692,6 +689,8 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
               const updatedDevices = devices.filter((d) => d.id !== device.id);
               await StorageService.saveDevices(updatedDevices);
               dispatch({ type: 'SET_DEVICES', payload: updatedDevices });
+              // 灭灯：无论该位置灯当前是亮还是灭，都发送一次 lightOff 给下位机
+              await turnOffLightForPosition(device.location);
               showSuccessMessage('器件已删除');
               Alert.alert('成功', '器件已删除');
             } catch (error) {
@@ -706,7 +705,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         },
       ]);
     },
-    [devices, dispatch, showSuccessMessage]
+    [devices, dispatch, showSuccessMessage, turnOffLightForPosition]
   );
 
   // 批量删除器件
@@ -726,12 +725,26 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           style: 'destructive',
           onPress: async () => {
             try {
+              // 记录待删除的器件列表（需要在 filter 之前获取位置信息）
+              const devicesToDelete = devices.filter((d) =>
+                selectedDevices.includes(d.id)
+              );
               const updatedDevices = devices.filter(
                 (d) => !selectedDevices.includes(d.id)
               );
               await StorageService.saveDevices(updatedDevices);
               dispatch({ type: 'SET_DEVICES', payload: updatedDevices });
               dispatch({ type: 'SET_SELECTION_MODE', payload: false });
+              // 灭灯：所有被删除器件对应的位置都发送 lightOff
+              const uniquePositions = new Set();
+              for (const d of devicesToDelete) {
+                if (d.location != null && d.location !== '') {
+                  uniquePositions.add(d.location);
+                }
+              }
+              for (const pos of uniquePositions) {
+                await turnOffLightForPosition(pos);
+              }
               showSuccessMessage(`已删除 ${selectedDevices.length} 个器件`);
             } catch (error) {
               logError(
@@ -746,6 +759,25 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       ]
     );
   }, [selectedDevices, devices, dispatch, showSuccessMessage]);
+
+  /**
+   * 发送 lightOff 指令给下位机，使指定位置的灯熄灭
+   * 无论该位置灯当前是亮还是灭，都会发送一次（要求硬件幂等处理）
+   * - 蓝牙未连接时直接跳过（删除操作依然成功）
+   * - 位置为空/无效时跳过
+   */
+  const turnOffLightForPosition = useCallback(async (position) => {
+    if (position == null || position === '') return;
+    if (!global.deviceConnection || !global.deviceConnection.handler) return;
+    try {
+      await global.deviceConnection.handler.sendCommand({
+        type: 'lightOff',
+        lightId: position,
+      });
+    } catch (error) {
+      console.log(`[删除灭灯] 位置 ${position} 灭灯指令发送失败:`, error);
+    }
+  }, []);
 
   // 切换选择模式
   const toggleSelectionMode = useCallback(() => {
@@ -879,83 +911,8 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     ]
   );
 
-  // 从Excel导入器件
-  const [isImporting, setIsImporting] = useState(false);
-
-  const handleImportFromExcel = useCallback(async () => {
-    try {
-      setIsImporting(true);
-
-      const result = await DocumentPicker.getDocumentAsync({
-        type: [
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        ],
-        copyToCacheDirectory: true,
-      });
-
-      if (result.canceled) {
-        setIsImporting(false);
-        return;
-      }
-
-      const fileUri = result.assets[0].uri;
-      const fileName = result.assets[0].name;
-
-      const cacheDir = FileSystem.cacheDirectory;
-      const localUri = cacheDir + fileName;
-
-      await FileSystem.copyAsync({
-        from: fileUri,
-        to: localUri,
-      });
-
-      const fileContent = await FileSystem.readAsStringAsync(localUri, {
-        encoding: 'base64',
-      });
-
-      const binaryString = atob(fileContent);
-      const workbook = XLSX.read(binaryString, { type: 'binary' });
-      const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const jsonData = XLSX.utils.sheet_to_json(worksheet);
-
-      if (jsonData.length === 0) {
-        Alert.alert('错误', '文件中没有数据，请检查文件内容');
-        setIsImporting(false);
-        return;
-      }
-
-      const csvContent = XLSX.utils.sheet_to_csv(worksheet);
-
-      const importResult =
-        await StorageService.importDevicesFromCSV(csvContent);
-
-      if (importResult.success) {
-        let message = `成功导入 ${importResult.imported} 个器件`;
-        if (importResult.errors && importResult.errors.length > 0) {
-          message += `\n\n有 ${importResult.errors.length} 个错误:`;
-          importResult.errors.forEach((error) => {
-            message += `\n- ${error}`;
-          });
-        }
-        Alert.alert('导入结果', message);
-        // 导入成功后重新加载列表
-        loadDevices();
-      } else {
-        Alert.alert(
-          '错误',
-          importResult.errors && importResult.errors.length > 0
-            ? importResult.errors.join('\n')
-            : '导入失败，请检查文件格式'
-        );
-      }
-    } catch (error) {
-      logError('导入失败', error, 'DeviceListScreen.handleImportFromExcel');
-      Alert.alert('错误', `导入失败: ${error.message || '请重试'}`);
-    } finally {
-      setIsImporting(false);
-    }
-  }, [loadDevices]);
+  // 从Excel导入器件 - 已废弃，改用扫码或"新建器件"入库
+  // 保留此注释说明历史代码已清理（2026-06-25）
 
   return (
     <SafeAreaView style={styles.container}>
@@ -1110,7 +1067,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         </View>
       )}
 
-      {/* 第一行：扫码 + 从Excel导入（多选模式下管理员已显示专属按钮，普通用户显示删除/取消） */}
+      {/* 第一行：扫码 + 新建器件（多选模式下管理员已显示专属按钮，普通用户显示删除/取消） */}
       <View style={styles.controlAllButtonsContainer}>
         {isSelectionMode && !isAdmin ? (
           <>
@@ -1139,17 +1096,12 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
               <Text style={styles.controlAllButtonText}>扫码</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[
-                styles.controlAllButton,
-                styles.addButton,
-                isImporting && styles.disabledButton,
-              ]}
-              onPress={handleImportFromExcel}
-              disabled={isImporting}
+              style={[styles.controlAllButton, styles.addButton]}
+              onPress={() =>
+                navigation.navigate('NewDevice', { onSave: loadDevices })
+              }
             >
-              <Text style={styles.addButtonText}>
-                {isImporting ? '导入中...' : '从Excel导入'}
-              </Text>
+              <Text style={styles.addButtonText}>新建器件</Text>
             </TouchableOpacity>
           </>
         ) : null}
@@ -1218,7 +1170,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
             <Text style={styles.emptySubtitle}>
               {searchQuery.trim()
                 ? '请尝试使用其他关键词搜索，或检查拼写是否正确'
-                : '请点击"从Excel导入"按钮导入器件数据'}
+                : '请点击"新建器件"或"扫码"按钮添加器件'}
             </Text>
           </View>
         )}

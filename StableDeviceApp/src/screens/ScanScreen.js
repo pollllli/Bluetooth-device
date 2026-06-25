@@ -44,8 +44,6 @@ const ScanScreen = ({ navigation, route }) => {
   const [occupiedPositions, setOccupiedPositions] = useState(new Map());
   // 提示消息的透明度动画值
   const toastOpacity = useRef(new Animated.Value(0)).current;
-  // 是否允许扫码（防止重复扫码）
-  const scanningRef = useRef(false);
   // 当前亮灯的位置编号（用于熄灯操作）
   const currentLitPosition = useRef(null);
   // 爬虫服务器地址（从本地加载）
@@ -61,12 +59,11 @@ const ScanScreen = ({ navigation, route }) => {
   const pendingDeviceRef = useRef(null);
   // 蓝牙未连接提示的防抖状态（避免频繁弹窗）
   const lastBluetoothAlertTime = useRef(0);
-  // 是否已开启扫码（默认关闭，点击"开始扫码"按钮后才启动相机预览）
-  const [isScanning, setIsScanning] = useState(false);
-  // 是否曾在本次进入界面后启动过扫码（启动后不再显示"开始扫码"按钮）
-  // 与 isScanning 解耦：isScanning 用于控制相机预览，可能因弹窗临时关闭；
-  // 该状态只在用户点击"开始扫码"后变为 true，组件重新挂载时回到 false。
-  const [hasStartedScanning, setHasStartedScanning] = useState(false);
+  // 是否已开启扫码（默认关闭，点击"扫码"按钮后才启动识别）
+  // 流程：点击"扫码" → 相机开始识别 → 命中后弹确认窗 → 上架/取消 → 回到 idle（预览待命）
+  // 再次扫码需用户再次点击按钮
+  const [isDetecting, setIsDetecting] = useState(false);
+  const detectingRef = useRef(false);
   // 器件类目数据（从存储加载，支持用户在"分类管理"页增删）
   const [categories, setCategories] = useState([]);
   // 类目搜索关键词
@@ -86,8 +83,8 @@ const ScanScreen = ({ navigation, route }) => {
 
     pendingDeviceRef.current = null;
     currentLitPosition.current = null;
-    scanningRef.current = false; // 默认不扫码，等用户点"开始扫码"按钮
-    setHasStartedScanning(false); // 重新进入界面时重置"已启动过"标记，按钮会再次出现
+    detectingRef.current = false;
+    setIsDetecting(false);
 
     // 组件卸载时清理延迟定时器
     return () => {
@@ -97,6 +94,11 @@ const ScanScreen = ({ navigation, route }) => {
       }
     };
   }, []);
+
+  // 同步 isDetecting → detectingRef（供 handleBarCodeScanned 等回调读取，避免闭包过期）
+  useEffect(() => {
+    detectingRef.current = isDetecting;
+  }, [isDetecting]);
 
   // 加载类目数据
   useFocusEffect(
@@ -170,6 +172,13 @@ const ScanScreen = ({ navigation, route }) => {
     });
   };
 
+  /**
+   * 扫码框内提示文案：根据是否正在识别切换
+   */
+  const getScanHintText = () => {
+    return isDetecting ? '正在识别…' : '将二维码/条形码对准扫描框';
+  };
+
   // 把 pendingDeviceRef 中的最新字段同步到 state（用于触发弹窗重新渲染）
   const syncDeviceSnapshot = () => {
     if (pendingDeviceRef.current) {
@@ -177,28 +186,33 @@ const ScanScreen = ({ navigation, route }) => {
     }
   };
 
-  /**
-   * 恢复扫码状态：同步刷新 ref + state，避免相机组件被卸载后黑屏无法恢复
-   * 用于所有早返回路径（如校验失败、扫描失败等）
-   */
+  // 恢复扫码状态：回到预览待命状态，等待用户再次点击"扫码"按钮
   const resumeScanning = useCallback(() => {
-    scanningRef.current = true;
-    setIsScanning(true);
+    setIsDetecting(false);
   }, []);
 
   /**
    * 强制重置扫码（兜底）：用于相机原生层异常、扫码中途被中断等场景
-   * 不改变 hasStartedScanning，避免按钮逻辑错乱
    */
   const resetCamera = useCallback(() => {
-    scanningRef.current = false;
-    setIsScanning(false);
+    setIsDetecting(false);
     // 下一帧再开启，给原生相机一个释放时间
     setTimeout(() => {
-      scanningRef.current = true;
-      setIsScanning(true);
+      setIsDetecting(true);
     }, 150);
   }, []);
+
+  /**
+   * 用户点击"扫码"按钮：
+   *   进入识别态，相机开始识别二维码/条码
+   *   命中后弹确认窗，确认/取消后回到 idle（预览待命）
+   *   下一次扫码需用户再次点击本按钮
+   */
+  const handleStartScan = useCallback(() => {
+    if (isDetecting) return; // 已在识别中
+    if (showConfirmModal || showPositionPicker) return; // 弹窗优先
+    setIsDetecting(true);
+  }, [isDetecting, showConfirmModal, showPositionPicker]);
 
   /**
    * 判断识别到的二维码是否完整在扫描框内（边角露出则不算）
@@ -341,30 +355,30 @@ const ScanScreen = ({ navigation, route }) => {
 
   // 扫码回调：识别到条码/二维码后触发
   const handleBarCodeScanned = async ({ type, data, bounds }) => {
-    // 防止重复扫码
-    if (!scanningRef.current) return;
+    // 仅在识别态才处理（用 detectingRef 避免闭包过期）
+    if (!detectingRef.current) return;
     // 确认弹窗显示时不处理新扫码
     if (showConfirmModal) return;
 
     // ★ 关键：必须二维码完整在扫描框内才识别（边角露出则忽略）
     if (!isQrFullyInFrame(bounds, scanFrameLayoutRef.current)) {
-      // 不完整：不暂停扫码、不显示绿点，让用户继续对准
+      // 不完整：不暂停识别、不显示绿点，让用户继续对准
       return;
     }
 
-    // 完整识别：用 scanningRef 暂停后续扫描，但保持相机继续打开
-    // （不调用 setIsScanning(false)，避免相机被卸载而出现"扫码已停止"兜底界面）
-    scanningRef.current = false;
+    // 完整识别：暂停识别（防止连击），保持相机继续打开
+    detectingRef.current = false;
+    setIsDetecting(false);
 
     // 清理上一次的延迟定时器（如果存在）
     if (detectionDelayTimerRef.current) {
       clearTimeout(detectionDelayTimerRef.current);
     }
-    // 1 秒后弹窗
+    // 0.5s 后弹窗（用户视觉缓冲）
     detectionDelayTimerRef.current = setTimeout(async () => {
       detectionDelayTimerRef.current = null;
       await processParsedQrCode(type, data);
-    }, 1000);
+    }, 500);
   };
 
   /**
@@ -416,7 +430,18 @@ const ScanScreen = ({ navigation, route }) => {
       // 防抖：5秒内不重复提示
       if (now - lastBluetoothAlertTime.current > 5000) {
         lastBluetoothAlertTime.current = now;
-        Alert.alert('提示', '蓝牙未连接，无法上架器件。请先在连接页面连接蓝牙设备。');
+        Alert.alert(
+          '提示',
+          '蓝牙未连接，无法上架器件。请先在连接页面连接蓝牙设备。',
+          [
+            { text: 'OK', style: 'cancel' },
+            {
+              text: '去连接',
+              onPress: () =>
+                navigation.navigate('MainTabs', { screen: 'Connection' }),
+            },
+          ]
+        );
       }
       resumeScanning();
       return;
@@ -685,15 +710,12 @@ const ScanScreen = ({ navigation, route }) => {
       setCrawlStatus(null);
       setIsCrawling(false);
       showToast('上架成功');
-      // 立即恢复扫码，不延迟：用户可紧接着扫描下一个器件
-      // 注意：hasStartedScanning 仍为 true，"开始扫码"按钮不会出现
-      scanningRef.current = true;
-      setIsScanning(true);
+      // 回到 idle 阶段，等待用户再次点击"扫码"按钮
+      setScanPhase('idle');
     } catch (error) {
       console.log('上架失败:', error);
       showToast('上架失败: ' + error.message);
-      scanningRef.current = true;
-      setIsScanning(true);
+      setScanPhase('idle');
     }
   };
 
@@ -833,7 +855,7 @@ const ScanScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 取消确认弹窗：放弃本次扫码上架，熄灭灯光，恢复扫码
+   * 取消确认弹窗：放弃本次扫码上架，熄灭灯光，回到 idle 阶段
    */
   const handleCancelConfirm = () => {
     console.log('点击取消按钮，清理所有状态');
@@ -850,8 +872,8 @@ const ScanScreen = ({ navigation, route }) => {
     setCrawlStatus(null);
     setIsCrawling(false);
 
-    scanningRef.current = true;
-    setIsScanning(true); // 取消后自动继续扫码
+    // 取消上架：回到预览待命状态，用户需再次点击按钮才能继续扫码
+    setIsDetecting(false);
   };
 
   /**
@@ -906,89 +928,61 @@ const ScanScreen = ({ navigation, route }) => {
   // 主界面：相机预览 + 扫码框 + 弹窗
   return (
     <View style={styles.container}>
-      {/* 仅在扫码开启时显示相机预览（默认黑屏省电+保护隐私） */}
-      {isScanning && (
-        <CameraView
-          style={StyleSheet.absoluteFillObject}
-          facing="back"
-          onBarcodeScanned={handleBarCodeScanned}
-          onMountError={({ message }) => {
-            // 相机原生层挂载失败（权限被撤销、相机被占用、硬件故障等）
-            logError('相机挂载失败', new Error(message), 'ScanScreen.CameraView');
-            showToast(`相机启动失败：${message || '请重试'}`);
-            // 关闭相机让 UI 回到兜底页
-            scanningRef.current = false;
-            setIsScanning(false);
-          }}
-          barcodeScannerSettings={{
-            barcodeTypes: ['qr', 'ean13', 'ean8', 'code128', 'code39', 'code93', 'upc_e', 'itf14'],
-          }}
-        />
-      )}
+      {/* 相机预览（常驻，授权后即打开，用户可随时预览二维码与扫描框的相对位置） */}
+      <CameraView
+        style={StyleSheet.absoluteFillObject}
+        facing="back"
+        onBarcodeScanned={handleBarCodeScanned}
+        onMountError={({ message }) => {
+          // 相机原生层挂载失败（权限被撤销、相机被占用、硬件故障等）
+          logError('相机挂载失败', new Error(message), 'ScanScreen.CameraView');
+          showToast(`相机启动失败：${message || '请重试'}`);
+          // 相机已挂掉，关闭识别等待用户重试
+          setIsDetecting(false);
+        }}
+        barcodeScannerSettings={{
+          barcodeTypes: ['qr', 'ean13', 'ean8', 'code128', 'code39', 'code93', 'upc_e', 'itf14'],
+        }}
+      />
 
       {/* 顶部导航栏 */}
       <View style={styles.topBar}>
         <View style={styles.placeholder} />
         <Text style={styles.scanTitle}>扫码导入器件</Text>
-        {/* [CRAWLER_DISABLED] 爬虫服务器配置按钮已隐藏
-        <TouchableOpacity
-          style={styles.serverConfigButton}
-          onPress={() => {
-            setTempServerInput(crawlerServer);
-            setShowServerConfig(true);
-          }}
-        >
-          <Text style={styles.serverConfigButtonText}>⚙</Text>
-        </TouchableOpacity>
-        */}
         <View style={styles.placeholder} />
       </View>
 
-      {/* 扫码框 + 提示（仅在扫码时显示） */}
-      {isScanning && (
-        <View
-          style={styles.scanFrame}
-          onLayout={(e) => {
-            // 记录扫描框的实际屏幕坐标，用于判断二维码是否完整在框内
-            scanFrameLayoutRef.current = e.nativeEvent.layout;
-          }}
-        >
-          <View style={styles.frameCornerTopLeft} />
-          <View style={styles.frameCornerTopRight} />
-          <View style={styles.frameCornerBottomLeft} />
-          <View style={styles.frameCornerBottomRight} />
+      {/* 扫码框（常驻），内部提示语根据是否在识别切换 */}
+      <View
+        style={styles.scanFrame}
+        onLayout={(e) => {
+          // 记录扫描框的实际屏幕坐标，用于判断二维码是否完整在框内
+          scanFrameLayoutRef.current = e.nativeEvent.layout;
+        }}
+      >
+        <View style={styles.frameCornerTopLeft} />
+        <View style={styles.frameCornerTopRight} />
+        <View style={styles.frameCornerBottomLeft} />
+        <View style={styles.frameCornerBottomRight} />
 
-          <Text style={styles.scanHint}>将二维码/条形码对准扫描框</Text>
-        </View>
-      )}
+        <Text style={styles.scanHint}>{getScanHintText()}</Text>
+      </View>
 
-      {/* 默认界面：未启动扫码时显示"开始扫码"按钮
-          条件：本次进入界面后未启动过扫码（hasStartedScanning=false）且无弹窗 */}
-      {!hasStartedScanning && !isScanning && !showConfirmModal && !showPositionPicker && (
-        <View style={styles.idleContainer}>
-          <View style={styles.idleIconBox}>
-            <Text style={styles.idleIconText}></Text>
-          </View>
-          <Text style={styles.idleTitle}>扫码导入器件</Text>
-          <Text style={styles.idleSubtitle}>
-            点击下方按钮启动相机{'\n'}将二维码/条形码对准扫描框即可识别
-          </Text>
+      {/* "扫码"按钮：位于扫码框下方，弹窗时隐藏 */}
+      {!showConfirmModal && !showPositionPicker && (
+        <View style={styles.scanButtonContainer}>
           <TouchableOpacity
-            style={styles.startScanButton}
-            onPress={() => {
-              scanningRef.current = true;
-              setIsScanning(true);
-              setHasStartedScanning(true); // 标记已启动过本次界面的扫码
-            }}
+            style={styles.scanActionButton}
+            onPress={handleStartScan}
+            disabled={isDetecting}
+            activeOpacity={0.8}
           >
-            <Text style={styles.startScanButtonText}>开始扫码</Text>
+            <Text style={styles.scanActionButtonText}>
+              {isDetecting ? '识别中…' : '扫码'}
+            </Text>
           </TouchableOpacity>
         </View>
       )}
-
-      {/* [SCAN_KEEP_CAMERA] 不再显示"扫码已停止"兜底界面
-          扫到码后相机会一直保持开启，只暂停扫描（scanningRef=false），1s 后弹窗
-          如果相机原生层真挂掉，会在 onMountError 里弹 toast 让用户重试 */}
 
       {/* 提示消息（带淡入淡出动画） */}
       {toastVisible && (
@@ -1081,7 +1075,7 @@ const ScanScreen = ({ navigation, route }) => {
                   style={styles.confirmButton}
                   onPress={handleConfirm}
                 >
-                  <Text style={styles.confirmButtonText}>确认</Text>
+                  <Text style={styles.confirmButtonText}>入库</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.cancelConfirmButton}
@@ -1498,7 +1492,38 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
 
-  /* ===== 闲置状态：未开始扫码时的居中卡片 ===== */
+  /* ===== 扫码按钮（位于扫码框下方） ===== */
+  scanButtonContainer: {
+    position: 'absolute',
+    // 扫码框 top:30% + width:70% 的高度 ≈ 屏幕中段偏上
+    // 按钮置于其下方约 16% 位置，确保可见且不与底部导航冲突
+    bottom: '12%',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  scanActionButton: {
+    backgroundColor: '#4caf50',
+    paddingVertical: 14,
+    paddingHorizontal: 56,
+    borderRadius: 32,
+    shadowColor: '#4caf50',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+    minWidth: 160,
+    alignItems: 'center',
+  },
+  scanActionButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 2,
+  },
+
+  /* ===== 闲置状态：未开始扫码时的居中卡片（已废弃，预览常驻） ===== */
   idleContainer: {
     flex: 1,
     justifyContent: 'center',

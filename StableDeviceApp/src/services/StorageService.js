@@ -543,6 +543,106 @@ class StorageService {
   }
 
   /**
+   * 重命名某大分类后，同步所有引用了该大分类的器件
+   * 让器件的 bigCategory / category 字段跟随最新的类目名称
+   * @param {string} oldBig
+   * @param {string} newBig
+   * @returns {Promise<{updated: number}>}
+   */
+  static async renameBigCategoryInDevices(oldBig, newBig) {
+    try {
+      if (!oldBig || !newBig || oldBig === newBig) return { updated: 0 };
+      const devices = await this.getDevices();
+      let updated = 0;
+      const now = new Date().toISOString();
+      const next = devices.map((d) => {
+        if (!d || d.bigCategory !== oldBig) return d;
+        updated++;
+        return { ...d, bigCategory: newBig, updatedAt: now };
+      });
+      if (updated > 0) await this.saveDevices(next);
+      return { updated };
+    } catch (error) {
+      logError('同步器件大分类失败', error, 'StorageService.renameBigCategoryInDevices');
+      return { updated: 0 };
+    }
+  }
+
+  /**
+   * 重命名某子类目后，同步所有引用了该子类目的器件
+   * @param {string} oldSub
+   * @param {string} newSub
+   * @returns {Promise<{updated: number}>}
+   */
+  static async renameSubCategoryInDevices(oldSub, newSub) {
+    try {
+      if (!oldSub || !newSub || oldSub === newSub) return { updated: 0 };
+      const devices = await this.getDevices();
+      let updated = 0;
+      const now = new Date().toISOString();
+      const next = devices.map((d) => {
+        if (!d || d.category !== oldSub) return d;
+        updated++;
+        return { ...d, category: newSub, updatedAt: now };
+      });
+      if (updated > 0) await this.saveDevices(next);
+      return { updated };
+    } catch (error) {
+      logError('同步器件子类目失败', error, 'StorageService.renameSubCategoryInDevices');
+      return { updated: 0 };
+    }
+  }
+
+  /**
+   * 删除某大分类后，清空引用该大分类的器件类目字段
+   * @param {string} big
+   * @returns {Promise<{updated: number}>}
+   */
+  static async deleteBigCategoryInDevices(big) {
+    try {
+      if (!big) return { updated: 0 };
+      const devices = await this.getDevices();
+      let updated = 0;
+      const now = new Date().toISOString();
+      const next = devices.map((d) => {
+        if (!d || d.bigCategory !== big) return d;
+        updated++;
+        return { ...d, bigCategory: '', category: '', updatedAt: now };
+      });
+      if (updated > 0) await this.saveDevices(next);
+      return { updated };
+    } catch (error) {
+      logError('清空器件大分类失败', error, 'StorageService.deleteBigCategoryInDevices');
+      return { updated: 0 };
+    }
+  }
+
+  /**
+   * 删除某子类目后，清空引用该子类目的器件 category 字段
+   * （bigCategory 保留 —— 大类本身未变，只是少了一个子项）
+   * @param {string} sub
+   * @returns {Promise<{updated: number}>}
+   */
+  static async deleteSubCategoryInDevices(sub) {
+    try {
+      if (!sub) return { updated: 0 };
+      const devices = await this.getDevices();
+      let updated = 0;
+      const now = new Date().toISOString();
+      const next = devices.map((d) => {
+        if (!d || d.category !== sub) return d;
+        updated++;
+        return { ...d, category: '', updatedAt: now };
+      });
+      if (updated > 0) await this.saveDevices(next);
+      return { updated };
+    } catch (error) {
+      logError('清空器件子类目失败', error, 'StorageService.deleteSubCategoryInDevices');
+      return { updated: 0 };
+    }
+  }
+
+  /**
    * 保存表单状态
    * @param {Object} formState - 表单状态对象
    * @returns {Promise<void>}
@@ -1011,10 +1111,25 @@ class StorageService {
           device[mappedField] = (values[index] || '').trim();
         });
 
-        // 验证必要字段（器件名称）
-        if (!device.name && !device['器件名称']) {
-          errors.push(`第 ${i + 1} 行: 器件名称不能为空`);
-          continue;
+        // 验证：只要任意字段有数据就导入（允许名称/编号为空，导入后显示为 null）；
+        // 仅当整行所有字段都为空时视为空行跳过
+        const hasAnyData =
+          device.name ||
+          device.supplierId ||
+          device.package ||
+          device.position ||
+          device.notes ||
+          device.category ||
+          device.value ||
+          device.quantity ||
+          device.location ||
+          device.manufacturer ||
+          device.supplier ||
+          device.price ||
+          device.datasheet ||
+          device.function;
+        if (!hasAnyData) {
+          continue; // 跳过完全空白的行
         }
 
         // 如果name为空但有中文名称，使用中文名称

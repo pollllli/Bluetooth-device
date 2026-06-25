@@ -23,6 +23,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as XLSX from 'xlsx';
 import StorageService from '../services/StorageService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
+import * as pendingBomImport from '../utils/pendingBomImport';
+import { usePendingBomImport } from '../utils/pendingBomImport';
 
 const BOMScreen = ({ navigation, isAdmin = false }) => {
   console.log('BOMScreen received isAdmin:', isAdmin);
@@ -223,7 +225,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
       await loadDevices();
 
       try {
-        // 将文件复制到缓存目录并读取内容
+        // 将文件复制到缓存目录（统一走本地路径，便于 processBomFile 复用）
         const cacheDir = FileSystem.cacheDirectory;
         const localUri = cacheDir + fileName;
 
@@ -232,18 +234,8 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
           to: localUri,
         });
 
-        // 读取文件并以Base64编码解析
-        const fileContent = await FileSystem.readAsStringAsync(localUri, {
-          encoding: 'base64',
-        });
-
-        // 使用XLSX库解析Excel文件
-        const binaryString = atob(fileContent);
-        const workbook = XLSX.read(binaryString, { type: 'binary' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const csvContent = XLSX.utils.sheet_to_csv(worksheet);
-        parseBOMData(csvContent, 'csv');
+        // 复用核心解析逻辑
+        await processBomFile(localUri, fileName);
       } catch (error) {
         logError('处理Excel文件失败', error, 'BOMScreen.handleImportBOM');
         Alert.alert(
@@ -258,6 +250,80 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
       setIsImporting(false);
     }
   };
+
+  /**
+   * 处理 BOM Excel 文件的核心流程（读取 → 解析 → 写入器件列表）
+   * 既被本地文件选择器使用，也被外部应用（微信等）分享的 BOM 文件使用
+   * @param {string} localUri - 缓存目录中的本地文件路径（file:// 开头或裸路径均可）
+   * @param {string} [fileName] - 文件名（用于错误提示，可选）
+   */
+  const processBomFile = async (localUri, fileName) => {
+    // 读取文件并以Base64编码解析
+    const fileContent = await FileSystem.readAsStringAsync(localUri, {
+      encoding: 'base64',
+    });
+
+    // 使用XLSX库解析Excel文件
+    const binaryString = atob(fileContent);
+    const workbook = XLSX.read(binaryString, { type: 'binary' });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const csvContent = XLSX.utils.sheet_to_csv(worksheet);
+    await parseBOMData(csvContent, 'csv');
+  };
+
+  /**
+   * 处理外部应用（微信等）传入的 BOM 文件
+   *
+   * 使用 usePendingBomImport() hook 替代 useFocusEffect / useNavigationState：
+   *   - hook 内部订阅模块级 emitter
+   *   - 每次 App.tsx 调用 pendingBomImport.set(uri, name) → 触发 BOMScreen re-render
+   *   - 不依赖 navigation state、不依赖 tab focus 状态、不依赖 useFocusEffect 时序
+   *   - 冷启动 / 热启动 / 已在 BOM tab / 刚切到 BOM tab 都能可靠工作
+   *
+   * 工作时序：
+   *   - 冷启动：set() → BOMScreen 还没 mount → navigate('BOM') → BOMScreen mount
+   *     → usePendingBomImport 注册 → 注册时 _state 有值 → 立即 listener
+   *     → setVersion → re-render → useEffect 跑 → take() → 处理
+   *   - 热启动：set() → BOMScreen 已 mount，hook 已注册 → listener 立即触发
+   *     → re-render → useEffect 跑 → take() → 处理
+   */
+  const pendingImport = usePendingBomImport();
+
+  useEffect(() => {
+    if (!pendingImport) return;
+    // 取出并清空（take 已经清空 _state，防止重复处理）
+    const taken = pendingBomImport.take();
+    if (!taken) return;
+
+    console.log('[BOM] 处理待导入 BOM:', taken.fileName);
+    (async () => {
+      try {
+        setIsImporting(true);
+        await loadDevices();
+        await processBomFile(taken.uri, taken.fileName);
+        Alert.alert('成功', `BOM 已成功导入「${taken.fileName}」`);
+      } catch (error) {
+        logError('处理外部 BOM 文件失败', error, 'BOMScreen.useEffect');
+        Alert.alert(
+          '错误',
+          `处理 BOM 文件失败: ${error.message || '请检查文件格式'}`
+        );
+      } finally {
+        setIsImporting(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingImport]);
+
+  // useFocusEffect 保留用于 turnOffCurrentLight
+  useFocusEffect(
+    React.useCallback(() => {
+      return () => {
+        turnOffCurrentLight();
+      };
+    }, [])
+  );
 
   /**
    * 将参数值字符串解析为电气参数类型
@@ -384,8 +450,19 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
         let componentName = deviceName || '';
 
-        // 至少有名称或编号才添加
-        if (componentName || supplierId) {
+        // 只要任意字段有数据就导入（允许名称/编号为空，导入后显示为 null）；
+        // 仅当整行所有字段都为空时视为空行跳过
+        const hasAnyData =
+          componentName ||
+          supplierId ||
+          packageType ||
+          bomPosition ||
+          description ||
+          category ||
+          value ||
+          (sortOrder && sortOrder > 0) ||
+          quantity;
+        if (hasAnyData) {
           bomComponents.push({
             name: componentName.trim() || '',
             supplierId: supplierId,
@@ -707,9 +784,9 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     if (!pendingComponent) return;
 
     try {
-      // 构建新器件数据
+      // 构建新器件数据（器件名/编号可能为空，使用空字符串兜底避免 undefined）
       const newDevice = {
-        name: pendingComponent.deviceName || pendingComponent.name,
+        name: pendingComponent.deviceName || pendingComponent.name || '',
         supplierId: pendingComponent.supplierId || '',
         package: pendingComponent.package || '',
         position: pendingComponent.position || '',
@@ -852,12 +929,25 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     <SafeAreaView style={styles.container}>
       {/* 页面标题栏 */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>BOM 配单</Text>
+        <Text style={styles.headerTitle}>BOM 匹配</Text>
       </View>
 
       <ScrollView style={styles.content}>
         <View style={styles.componentsList}>
-          <Text style={styles.label}>器件列表</Text>
+          {/* 标题栏：器件列表 + 导入按钮（右上角） */}
+          <View style={styles.listHeader}>
+            <Text style={styles.label}>器件列表</Text>
+            <TouchableOpacity
+              style={styles.importButtonTop}
+              onPress={handleImportBOM}
+              disabled={isImporting}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.importButtonText}>
+                {isImporting ? '导入中...' : '导入'}
+              </Text>
+            </TouchableOpacity>
+          </View>
 
           {/* 搜索输入框 */}
           <View style={styles.searchInputContainer}>
@@ -922,35 +1012,35 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                       {/* 编号和名称（同一行） */}
                       <View style={styles.rowContainer}>
                         <View style={styles.rowItem}>
-                          <Text style={styles.labelText}>编号: </Text>
                           <Text style={styles.valueText}>{component.supplierId || 'null'}</Text>
                         </View>
                         <View style={styles.rowItem}>
-                          <Text style={styles.labelText}>名称: </Text>
-                          <Text style={styles.valueText}>{component.name || 'null'}</Text>
+                          <Text style={[styles.valueText, { color: '#1976d2', fontWeight: 'bold', fontSize: 16 }]}>{component.name || 'null'}</Text>
                         </View>
                       </View>
+                      {/* 类目（名称下方，过长省略） */}
+                      {component.category ? (
+                        <Text style={styles.deviceInfo} numberOfLines={1} ellipsizeMode="tail">
+                          <Text style={styles.valueText}>{component.category}</Text>
+                        </Text>
+                      ) : null}
                       {/* 封装（有值时显示） */}
                       {component.package && (
                         <Text style={styles.deviceInfo}>
-                          <Text style={styles.labelText}>封装:</Text>
                           <Text style={styles.valueText}>{component.package}</Text>
                         </Text>
                       )}
                       {/* 位号 */}
                       <Text style={styles.deviceInfo}>
-                        <Text style={styles.labelText}>位号:</Text>
                         <Text style={styles.valueText}>{component.position || '未设置'}</Text>
                       </Text>
                       {/* 底部行：左侧位置信息，右侧数量 */}
                       <View style={styles.bottomRow}>
                         <Text style={[styles.statusText, { color: textColor }]}>
-                          <Text style={styles.labelText}>位置:</Text>
                           <Text style={styles.valueText}>{positionsText}</Text>
                         </Text>
                         {component.quantity && (
                           <Text style={styles.quantityText}>
-                            <Text style={styles.labelText}>数量:</Text>
                             <Text style={styles.valueText}>{component.quantity}</Text>
                           </Text>
                         )}
@@ -977,34 +1067,32 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                       {/* 编号和名称（同一行） */}
                       <View style={styles.rowContainer}>
                         <View style={styles.rowItem}>
-                          <Text style={styles.labelText}>编号: </Text>
                           <Text style={styles.valueText}>{component.supplierId || 'null'}</Text>
                         </View>
                         <View style={styles.rowItem}>
-                          <Text style={styles.labelText}>名称: </Text>
-                          <Text style={styles.valueText}>{component.name || 'null'}</Text>
+                          <Text style={[styles.valueText, { color: '#1976d2', fontWeight: 'bold', fontSize: 16 }]}>{component.name || 'null'}</Text>
                         </View>
                       </View>
+                      {/* 类目（名称下方，过长省略） */}
+                      {component.category ? (
+                        <Text style={styles.deviceInfo} numberOfLines={1} ellipsizeMode="tail">
+                          <Text style={styles.valueText}>{component.category}</Text>
+                        </Text>
+                      ) : null}
                       {/* 封装（有值时显示） */}
                       {component.package && (
                         <Text style={styles.deviceInfo}>
-                          <Text style={styles.labelText}>封装:</Text>
                           <Text style={styles.valueText}>{component.package}</Text>
                         </Text>
                       )}
-                      {/* 位号（未上架时显示"未设置"） */}
+                      {/* 位号 */}
                       <Text style={styles.deviceInfo}>
-                        <Text style={styles.labelText}>位号:</Text>
-                        <Text style={styles.valueText}>未设置</Text>
+                        <Text style={styles.valueText}>{component.position || '未设置'}</Text>
                       </Text>
-                      {/* 底部行：左侧状态提示，右侧数量 */}
+                      {/* 底部行：右侧数量（左侧的状态提示已移除，橘色背景已足够辨识） */}
                       <View style={styles.bottomRow}>
-                        <Text style={[styles.statusText, { color: '#ef6c00' }]}>
-                          ✗ 不在器件架中
-                        </Text>
                         {component.quantity && (
                           <Text style={styles.quantityText}>
-                            <Text style={styles.labelText}>数量:</Text>
                             <Text style={styles.valueText}>{component.quantity}</Text>
                           </Text>
                         )}
@@ -1022,19 +1110,6 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
               }
             })
         )}
-        </View>
-
-        {/* 导入BOM文件按钮 */}
-        <View style={styles.buttonContainer}>
-          <TouchableOpacity
-            style={[styles.button, styles.importButton]}
-            onPress={handleImportBOM}
-            disabled={isImporting}
-          >
-            <Text style={styles.buttonText}>
-              {isImporting ? '导入中...' : '导入 BOM 文件'}
-            </Text>
-          </TouchableOpacity>
         </View>
       </ScrollView>
 
@@ -1174,7 +1249,28 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  // 标题栏：器件列表 + 右上角「导入」按钮
+  listHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     marginBottom: 8,
+  },
+  // 标题栏右侧的「导入」按钮（橘色，紧凑尺寸）
+  importButtonTop: {
+    backgroundColor: '#ff9800',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 6,
+    minWidth: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  importButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
   componentsList: {
     marginBottom: 20,
@@ -1268,28 +1364,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#ddd',
     borderStyle: 'dashed',
-  },
-  /* 按钮容器 */
-  buttonContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  button: {
-    flex: 1,
-    padding: 16,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginHorizontal: 5,
-  },
-  /* 导入按钮（橙色） */
-  importButton: {
-    backgroundColor: '#ff9800',
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
   },
   /* 上架按钮（蓝色） */
   shelfButton: {

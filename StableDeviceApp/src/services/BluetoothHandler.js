@@ -189,13 +189,13 @@ class BluetoothHandler {
 
       return new Promise((resolve, reject) => {
         const devices = [];
-        // 设置10秒扫描超时
+        // 扫描超时：2 秒（用户需求：尽量短的反馈时间 + 失败后让用户选择重扫）
         const scanTimeout = setTimeout(() => {
           this.manager.stopDeviceScan();
           this.isScanning = false;
-          console.log('扫描超时，返回设备列表:', devices);
+          console.log('扫描超时（2s），返回设备列表:', devices);
           resolve(devices);
-        }, 10000);
+        }, 2000);
 
         // 开始扫描设备
         this.manager.startDeviceScan(
@@ -211,14 +211,25 @@ class BluetoothHandler {
               return;
             }
 
-            // 只添加有名称且未重复的设备
-            if (device.name && !devices.some((d) => d.id === device.id)) {
+            // 过滤条件（用户需求）：
+            //   1) 必须有名称
+            //   2) RSSI 必须 >= -90dBm（包含较远但仍可用的设备）
+            //   3) 未重复的设备
+            if (
+              device.name &&
+              typeof device.rssi === 'number' &&
+              device.rssi >= -90 &&
+              !devices.some((d) => d.id === device.id)
+            ) {
               devices.push({
                 id: device.id,
                 name: device.name,
                 rssi: device.rssi,
               });
-              console.log('发现设备:', device.name, device.id, device.rssi);
+              console.log('发现设备:', device.name, device.id, device.rssi, 'dBm');
+            } else if (device.name && typeof device.rssi === 'number' && device.rssi < -90) {
+              // 调试日志：记录被过滤的极弱信号设备
+              console.log('过滤极弱信号设备:', device.name, device.id, device.rssi, 'dBm（< -90）');
             }
           }
         );

@@ -35,7 +35,6 @@ StableDeviceApp/
 
 ### 2. 页面组件
 
-- **LoginScreen**：登录和注册页面
 - **DeviceListScreen**：器件库存列表页面
 - **DeviceDetailScreen**：器件详情页面
 - **AdminEditScreen**：器件编辑和上架页面

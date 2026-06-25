@@ -1,11 +1,12 @@
 /**
- * 管理员编辑页面组件
+ * 新建器件页面组件（无二维码器件入库）
  *
  * 功能说明：
- * - 新增器件上架
- * - 编辑已有器件信息
- * - 支持选择物理位置（蓝牙亮灯提示）
- * - 支持选择器件类目
+ * - 适用于没有二维码、需手工填入信息的器件
+ * - 器件编号自动生成：H + 年份(2) + 月日(4) + 首次存放位置(3位补零)
+ *   例如 2026-06-23 存入 99 位置 → H260623099
+ * - 不包含电气参数字段（电阻/电压/电容/电感/电流/功率/频率）
+ * - 字段参考 AdminEditScreen（器件编辑页）但已精简
  */
 import React, { useState, useEffect, useReducer, useRef, useCallback } from 'react';
 import {
@@ -22,39 +23,25 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
-import { logError, formatErrorMessage } from '../utils/ErrorHandler';
+import { logError } from '../utils/ErrorHandler';
 import { getCategories } from '../services/DeviceCategoryService';
 
-const AdminEditScreen = ({ navigation, route }) => {
-  // 获取路由参数：device（编辑时的器件数据）、isNew（是否新增）、onSave（保存回调）
-  const { device, isNew, onSave } = route.params || {};
+const NewDeviceScreen = ({ navigation, route }) => {
+  const { onSave } = route.params || {};
 
   /**
    * 表单初始状态
-   *
-   * id: 器件唯一标识（新增时为null）
-   * supplierId: 供应商编号
-   * name: 器件名称
-   * brand: 采购渠道（原品牌字段，扫码时手动输入）
-   * category: 器件类目
-   * package: 封装形式
-   * quantity: 数量
-   * location: 物理位置（0-239）
-   * notes: 备注说明
-   * shelfId: 器件架编号（默认1）
-   * errors: 表单验证错误信息
+   * supplierId 由选中位置后自动生成，初始为空
    */
   const initialState = {
-    id: device?.id || null,
-    supplierId: device?.supplierId || '',
-    name: device?.name || '',
-    brand: device?.brand || '',
-    category: device?.category || '',
-    package: device?.package || '',
-    quantity: device?.quantity != null ? String(device.quantity) : '1',
-    location: device?.location != null && device?.location !== '' ? String(device.location) : '',
-    notes: device?.notes || '',
-    shelfId: device?.shelfId ? device.shelfId.toString() : '1',
+    supplierId: '',
+    name: '',
+    category: '',
+    package: '',
+    quantity: '1',
+    location: '',
+    notes: '',
+    brand: '',
     errors: {},
   };
 
@@ -64,18 +51,19 @@ const AdminEditScreen = ({ navigation, route }) => {
         return {
           ...state,
           [action.payload.field]: action.payload.value,
-          errors: {
-            ...state.errors,
-            [action.payload.field]: '',
-          },
+          errors: { ...state.errors, [action.payload.field]: '' },
         };
-      case 'SET_ERRORS':
+      case 'SET_FIELDS':
         return {
           ...state,
-          errors: action.payload,
+          ...action.payload,
+          errors: Object.keys(action.payload).reduce(
+            (acc, k) => ({ ...acc, [k]: '' }),
+            { ...state.errors }
+          ),
         };
-      case 'RESET':
-        return initialState;
+      case 'SET_ERRORS':
+        return { ...state, errors: action.payload };
       default:
         return state;
     }
@@ -87,13 +75,24 @@ const AdminEditScreen = ({ navigation, route }) => {
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
   const [allDevices, setAllDevices] = useState([]);
   const [expandedBank, setExpandedBank] = useState(null);
-  const [expandedCategory, setExpandedCategory] = useState(null);
-  // 器件类目数据（从存储加载，支持用户在"分类管理"页增删）
   const [categories, setCategories] = useState([]);
-  // 类目搜索关键词
   const [categorySearchQuery, setCategorySearchQuery] = useState('');
+  const [expandedCategory, setExpandedCategory] = useState(null);
   const currentLitPosition = useRef(null);
   const previewTimeout = useRef(null);
+
+  /**
+   * 生成器件编号
+   * 格式：H + 年份(后2位) + MMDD + 位置(3位补零)
+   */
+  const generateSupplierId = (position) => {
+    const now = new Date();
+    const year = String(now.getFullYear()).slice(-2);
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const pos = String(parseInt(position, 10)).padStart(3, '0');
+    return `H${year}${month}${day}${pos}`;
+  };
 
   const sendLightCommand = async (type, position) => {
     if (!global.deviceConnection || !global.deviceConnection.handler) return;
@@ -105,23 +104,17 @@ const AdminEditScreen = ({ navigation, route }) => {
   };
 
   const turnOffCurrentLight = async () => {
-    // 清除预览定时器
     if (previewTimeout.current) {
       clearTimeout(previewTimeout.current);
       previewTimeout.current = null;
     }
-    // 熄灭灯光
     if (currentLitPosition.current !== null) {
       await sendLightCommand('lightOff', currentLitPosition.current);
       currentLitPosition.current = null;
     }
   };
 
-  /**
-   * 打开类目选择器：默认展开当前类目所在的大类
-   */
   const handleOpenCategoryPicker = async () => {
-    // 重新加载类目，保证拿到最新数据
     const list = await getCategories();
     setCategories(list);
     const currentCat = state.category || '';
@@ -135,14 +128,8 @@ const AdminEditScreen = ({ navigation, route }) => {
     setShowCategoryPicker(true);
   };
 
-  /**
-   * 选择具体小类目后，更新表单的类目字段
-   */
   const handleSelectCategory = (subCategory) => {
-    dispatch({
-      type: 'SET_FIELD',
-      payload: { field: 'category', value: subCategory },
-    });
+    dispatch({ type: 'SET_FIELD', payload: { field: 'category', value: subCategory } });
     setShowCategoryPicker(false);
     setExpandedCategory(null);
   };
@@ -172,7 +159,7 @@ const AdminEditScreen = ({ navigation, route }) => {
   const getOccupiedPositions = () => {
     const occupied = new Map();
     allDevices
-      .filter((d) => d.shelfId === '1' && d.location != null && d.location !== '' && d.id !== state.id)
+      .filter((d) => d.shelfId === '1' && d.location != null && d.location !== '')
       .forEach((d) => {
         const pos = parseInt(d.location, 10);
         if (!isNaN(pos)) {
@@ -195,19 +182,61 @@ const AdminEditScreen = ({ navigation, route }) => {
     return positions;
   };
 
+  /**
+   * 选中位置后：更新位置 + 自动生成 supplierId
+   */
+  const handleSelectPosition = async (position) => {
+    const supplierId = generateSupplierId(position);
+    dispatch({
+      type: 'SET_FIELDS',
+      payload: { location: String(position), supplierId },
+    });
+
+    // 亮灯提示新位置
+    if (global.deviceConnection && global.deviceConnection.handler) {
+      if (currentLitPosition.current !== null) {
+        await sendLightCommand('lightOff', currentLitPosition.current);
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      await sendLightCommand('lightOn', position);
+      currentLitPosition.current = position;
+    }
+    setShowPositionPicker(false);
+  };
+
+  const handlePositionPreview = async (posInfo) => {
+    if (posInfo.isOccupied) return;
+    if (previewTimeout.current) {
+      clearTimeout(previewTimeout.current);
+    }
+    if (currentLitPosition.current !== null) {
+      await sendLightCommand('lightOff', currentLitPosition.current);
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    await sendLightCommand('lightOn', posInfo.position);
+    currentLitPosition.current = posInfo.position;
+    previewTimeout.current = setTimeout(async () => {
+      if (currentLitPosition.current === posInfo.position) {
+        await sendLightCommand('lightOff', posInfo.position);
+        currentLitPosition.current = null;
+      }
+      previewTimeout.current = null;
+    }, 1500);
+  };
+
   const validateForm = () => {
     const errors = {};
-
-    if (!state.name.trim() && !state.supplierId.trim()) {
-      errors.name = '器件名称和供应商编号至少填写一项';
+    if (!state.name.trim()) {
+      errors.name = '请输入器件名称';
     }
-
+    if (!state.location) {
+      errors.location = '请选择存放位置';
+    }
     return errors;
   };
 
   const handleSave = async () => {
     const errors = validateForm();
-
     if (Object.keys(errors).length > 0) {
       dispatch({ type: 'SET_ERRORS', payload: errors });
       Alert.alert('错误', '请检查表单填写是否正确');
@@ -217,46 +246,40 @@ const AdminEditScreen = ({ navigation, route }) => {
     setIsLoading(true);
     try {
       const deviceData = {
-        ...state,
-        id: state.id || Date.now(),
+        id: Date.now(),
+        supplierId: state.supplierId,
+        name: state.name.trim(),
+        category: state.category,
+        package: state.package.trim(),
         quantity: parseInt(state.quantity) || 1,
+        location: state.location,
+        notes: state.notes.trim(),
+        brand: state.brand.trim(),
+        shelfId: '1',
       };
 
       let savedDevice;
-      if (isNew) {
-        try {
-          savedDevice = await StorageService.addDevice(deviceData);
-          Alert.alert('成功', '器件上架成功');
-        } catch (error) {
-          if (error.message && error.message.includes('冲突')) {
-            Alert.alert('错误', error.message);
-            return;
-          } else {
-            throw error;
-          }
+      try {
+        savedDevice = await StorageService.addDevice(deviceData);
+      } catch (error) {
+        if (error.message && error.message.includes('冲突')) {
+          Alert.alert('错误', error.message);
+          return;
         }
-      } else {
-        try {
-          savedDevice = await StorageService.updateDevice(deviceData);
-          Alert.alert('成功', '器件更新成功');
-        } catch (error) {
-          if (error.message && error.message.includes('冲突')) {
-            Alert.alert('错误', error.message);
-            return;
-          } else {
-            throw error;
-          }
-        }
+        throw error;
       }
 
-      if (onSave) {
-        onSave(savedDevice);
-      }
+      // 熄灭灯光
+      await turnOffCurrentLight();
 
-      navigation.goBack();
+      if (onSave) onSave(savedDevice);
+
+      Alert.alert('成功', `器件入库成功\n编号：${state.supplierId}`, [
+        { text: '确定', onPress: () => navigation.goBack() },
+      ]);
     } catch (error) {
-      logError('保存器件失败', error, 'AdminEditScreen.handleSave');
-      Alert.alert('错误', '保存器件失败，请重试');
+      logError('新建器件失败', error, 'NewDeviceScreen.handleSave');
+      Alert.alert('错误', '新建器件失败，请重试');
     } finally {
       setIsLoading(false);
     }
@@ -269,34 +292,30 @@ const AdminEditScreen = ({ navigation, route }) => {
     >
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={true}>
         <View style={styles.formContainer}>
-          {isNew && (
-            <View style={styles.importButtonContainer}>
-              <TouchableOpacity
-                style={[styles.importButton, styles.scanButton]}
-                onPress={() => navigation.navigate('ScanScreen')}
-              >
-                <Text style={styles.importButtonText}>扫码导入</Text>
-              </TouchableOpacity>
-            </View>
-          )}
+          <View style={styles.hintBox}>
+            <Text style={styles.hintText}>
+              适用于没有二维码的器件入库。{'\n'}
+              编号将根据您选择的存放位置自动生成。
+            </Text>
+          </View>
 
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>基本信息</Text>
 
-            {/* 1. 编号 */}
+            {/* 1. 编号（只读，自动生成） */}
             <View style={styles.formGroup}>
-              <Text style={styles.label}>编号</Text>
-              <TextInput
-                style={styles.input}
-                value={state.supplierId}
-                onChangeText={(text) =>
-                  dispatch({
-                    type: 'SET_FIELD',
-                    payload: { field: 'supplierId', value: text },
-                  })
-                }
-                placeholder="请输入编号"
-              />
+              <Text style={styles.label}>编号（自动生成）</Text>
+              <View style={styles.supplierIdBox}>
+                <Text
+                  style={[
+                    styles.supplierIdText,
+                    !state.supplierId && styles.supplierIdPlaceholder,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {state.supplierId || '请先选择下方"位置"以生成编号'}
+                </Text>
+              </View>
             </View>
 
             {/* 2. 名称 */}
@@ -306,19 +325,16 @@ const AdminEditScreen = ({ navigation, route }) => {
                 style={[styles.input, state.errors.name && styles.inputError]}
                 value={state.name}
                 onChangeText={(text) =>
-                  dispatch({
-                    type: 'SET_FIELD',
-                    payload: { field: 'name', value: text },
-                  })
+                  dispatch({ type: 'SET_FIELD', payload: { field: 'name', value: text } })
                 }
-                placeholder="请输入名称"
+                placeholder="请输入器件名称"
               />
               {state.errors.name && (
                 <Text style={styles.errorText}>{state.errors.name}</Text>
               )}
             </View>
 
-            {/* 3. 类目（手动选择，爬虫已关闭但类目选择器仍可用） */}
+            {/* 3. 类目 */}
             <View style={styles.formGroup}>
               <Text style={styles.label}>类目</Text>
               <TouchableOpacity
@@ -348,23 +364,34 @@ const AdminEditScreen = ({ navigation, route }) => {
               />
             </View>
 
-            {/* 5. 位置 */}
+            {/* 5. 位置（必填） */}
             <View style={styles.formGroup}>
-              <Text style={styles.label}>位置</Text>
+              <Text style={styles.label}>位置 *</Text>
               <TouchableOpacity
-                style={styles.positionButton}
+                style={[
+                  styles.positionButton,
+                  state.errors.location && styles.inputError,
+                ]}
                 onPress={() => {
                   if (!global.deviceConnection) {
-                    Alert.alert('提示', '选择位置需要连接蓝牙设备以亮灯提示位置，请先在连接页面连接蓝牙设备');
+                    Alert.alert(
+                      '提示',
+                      '选择位置需要连接蓝牙设备以亮灯提示位置，请先在连接页面连接蓝牙设备'
+                    );
                     return;
                   }
                   setShowPositionPicker(true);
                 }}
               >
                 <Text style={styles.positionButtonText}>
-                  {state.location != null && state.location !== '' ? `位置 ${state.location}` : '点击选择位置'}
+                  {state.location != null && state.location !== ''
+                    ? `位置 ${state.location}`
+                    : '点击选择位置'}
                 </Text>
               </TouchableOpacity>
+              {state.errors.location && (
+                <Text style={styles.errorText}>{state.errors.location}</Text>
+              )}
             </View>
 
             {/* 6. 备注 */}
@@ -374,10 +401,7 @@ const AdminEditScreen = ({ navigation, route }) => {
                 style={[styles.input, styles.textArea]}
                 value={state.notes}
                 onChangeText={(text) =>
-                  dispatch({
-                    type: 'SET_FIELD',
-                    payload: { field: 'notes', value: text },
-                  })
+                  dispatch({ type: 'SET_FIELD', payload: { field: 'notes', value: text } })
                 }
                 placeholder="请输入备注"
                 multiline
@@ -385,33 +409,27 @@ const AdminEditScreen = ({ navigation, route }) => {
               />
             </View>
 
-            {/* 7. 采购渠道（原"品牌"字段，扫码时手动输入，此处可查看/修改） */}
+            {/* 7. 采购渠道 */}
             <View style={styles.formGroup}>
               <Text style={styles.label}>采购渠道</Text>
               <TextInput
                 style={styles.input}
                 value={state.brand}
                 onChangeText={(text) =>
-                  dispatch({
-                    type: 'SET_FIELD',
-                    payload: { field: 'brand', value: text },
-                  })
+                  dispatch({ type: 'SET_FIELD', payload: { field: 'brand', value: text } })
                 }
                 placeholder="如：立创商城 / 淘宝 / 自有库存..."
               />
             </View>
 
-            {/* 8. 封装（可选辅助字段） */}
+            {/* 8. 封装 */}
             <View style={styles.formGroup}>
               <Text style={styles.label}>封装</Text>
               <TextInput
                 style={styles.input}
                 value={state.package}
                 onChangeText={(text) =>
-                  dispatch({
-                    type: 'SET_FIELD',
-                    payload: { field: 'package', value: text },
-                  })
+                  dispatch({ type: 'SET_FIELD', payload: { field: 'package', value: text } })
                 }
                 placeholder="请输入封装"
               />
@@ -424,12 +442,13 @@ const AdminEditScreen = ({ navigation, route }) => {
             disabled={isLoading}
           >
             <Text style={styles.saveButtonText}>
-              {isLoading ? '保存中...' : isNew ? '上架器件' : '更新器件'}
+              {isLoading ? '入库中...' : '入库器件'}
             </Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
 
+      {/* 位置选择弹窗 */}
       <Modal
         visible={showPositionPicker}
         transparent={true}
@@ -441,7 +460,7 @@ const AdminEditScreen = ({ navigation, route }) => {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>选择物理位置</Text>
+            <Text style={styles.modalTitle}>选择存放位置</Text>
             <ScrollView style={styles.positionGrid}>
               {Array.from({ length: 8 }, (_, bankIndex) => (
                 <View key={bankIndex}>
@@ -461,68 +480,36 @@ const AdminEditScreen = ({ navigation, route }) => {
                       {getAllPositions()
                         .slice(bankIndex * 30, (bankIndex + 1) * 30)
                         .map((posInfo) => {
-                          const isCurrentPosition = state.location === String(posInfo.position);
+                          const isCurrent = state.location === String(posInfo.position);
                           return (
                             <TouchableOpacity
                               key={posInfo.position}
                               style={[
                                 styles.positionItem,
-                                posInfo.isOccupied ? styles.positionItemOccupied : styles.positionItemEmpty,
-                                isCurrentPosition && styles.positionItemCurrent,
+                                posInfo.isOccupied
+                                  ? styles.positionItemOccupied
+                                  : styles.positionItemEmpty,
+                                isCurrent && styles.positionItemCurrent,
                               ]}
-                              onPress={async () => {
-                                if (posInfo.isOccupied && !isCurrentPosition) return;
-                                if (global.deviceConnection && global.deviceConnection.handler) {
-                                  if (currentLitPosition.current !== null) {
-                                    await sendLightCommand('lightOff', currentLitPosition.current);
-                                    await new Promise(resolve => setTimeout(resolve, 300));
-                                  }
-                                  await sendLightCommand('lightOn', posInfo.position);
-                                  currentLitPosition.current = posInfo.position;
-                                }
-                                dispatch({
-                                  type: 'SET_FIELD',
-                                  payload: { field: 'location', value: String(posInfo.position) },
-                                });
-                                setShowPositionPicker(false);
+                              onPress={() => {
+                                if (posInfo.isOccupied && !isCurrent) return;
+                                handleSelectPosition(posInfo.position);
                               }}
-                              onLongPress={async () => {
-                                if (posInfo.isOccupied && !isCurrentPosition) return;
-                                if (global.deviceConnection && global.deviceConnection.handler) {
-                                  // 清除之前的自动熄灭定时器
-                                  if (previewTimeout.current) {
-                                    clearTimeout(previewTimeout.current);
-                                  }
-                                  // 关闭之前亮的灯
-                                  if (currentLitPosition.current !== null) {
-                                    await sendLightCommand('lightOff', currentLitPosition.current);
-                                    await new Promise(resolve => setTimeout(resolve, 300));
-                                  }
-                                  // 点亮新位置的灯
-                                  await sendLightCommand('lightOn', posInfo.position);
-                                  currentLitPosition.current = posInfo.position;
-                                  // 1.5秒后自动熄灭预览灯
-                                  previewTimeout.current = setTimeout(async () => {
-                                    if (currentLitPosition.current === posInfo.position) {
-                                      await sendLightCommand('lightOff', posInfo.position);
-                                      currentLitPosition.current = null;
-                                    }
-                                    previewTimeout.current = null;
-                                  }, 1500);
-                                }
-                              }}
-                              activeOpacity={posInfo.isOccupied && !isCurrentPosition ? 1 : 0.7}
+                              onLongPress={() => handlePositionPreview(posInfo)}
+                              activeOpacity={posInfo.isOccupied && !isCurrent ? 1 : 0.7}
                             >
                               <Text
                                 style={[
                                   styles.positionItemText,
-                                  posInfo.isOccupied ? styles.positionItemTextOccupied : styles.positionItemTextEmpty,
-                                  isCurrentPosition && styles.positionItemTextCurrent,
+                                  posInfo.isOccupied
+                                    ? styles.positionItemTextOccupied
+                                    : styles.positionItemTextEmpty,
+                                  isCurrent && styles.positionItemTextCurrent,
                                 ]}
                               >
                                 {posInfo.position}
                               </Text>
-                              {isCurrentPosition && (
+                              {isCurrent && (
                                 <Text style={styles.positionItemCurrentLabel} numberOfLines={1}>
                                   当前
                                 </Text>
@@ -548,7 +535,7 @@ const AdminEditScreen = ({ navigation, route }) => {
         </View>
       </Modal>
 
-      {/* 类目选择弹窗：40个大类，每个大类可展开/折叠小类目，点击小类目确认 */}
+      {/* 类目选择弹窗 */}
       <Modal
         visible={showCategoryPicker}
         transparent={true}
@@ -562,7 +549,6 @@ const AdminEditScreen = ({ navigation, route }) => {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>选择器件类目</Text>
-            {/* 搜索框 */}
             <TextInput
               style={styles.categorySearchInput}
               placeholder="搜索类目..."
@@ -571,11 +557,9 @@ const AdminEditScreen = ({ navigation, route }) => {
               autoCapitalize="none"
               autoCorrect={false}
             />
-            {/* 显示当前已选类目 */}
             {state.category ? (
               <Text style={styles.categoryCurrentLabel}>当前：{state.category}</Text>
             ) : null}
-            {/* 类目网格：所有大类，点击展开/折叠显示小类目 */}
             <ScrollView style={styles.positionGrid}>
               {(() => {
                 if (categorySearchQuery.trim()) {
@@ -600,20 +584,13 @@ const AdminEditScreen = ({ navigation, route }) => {
                             <Text style={styles.subCategoryItemText} numberOfLines={1}>
                               {item.sub}
                             </Text>
-                            <Text style={styles.subCategoryItemBig}>
-                              {item.big}
-                            </Text>
+                            <Text style={styles.subCategoryItemBig}>{item.big}</Text>
                           </TouchableOpacity>
                         ))}
                       </View>
                     );
-                  } else {
-                    return (
-                      <Text style={styles.searchEmptyText}>
-                        未找到匹配的类目
-                      </Text>
-                    );
                   }
+                  return <Text style={styles.searchEmptyText}>未找到匹配的类目</Text>;
                 }
                 return categories.map((cat, idx) => (
                   <View key={cat.name}>
@@ -636,7 +613,9 @@ const AdminEditScreen = ({ navigation, route }) => {
                             style={styles.subCategoryItem}
                             onPress={() => handleSelectCategory(sub)}
                           >
-                            <Text style={styles.subCategoryItemText} numberOfLines={1}>{sub}</Text>
+                            <Text style={styles.subCategoryItemText} numberOfLines={1}>
+                              {sub}
+                            </Text>
                           </TouchableOpacity>
                         ))}
                       </View>
@@ -673,10 +652,18 @@ const styles = StyleSheet.create({
   formContainer: {
     padding: 20,
   },
-  importButtonContainer: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 20,
+  hintBox: {
+    backgroundColor: '#e3f2fd',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: '#1976d2',
+  },
+  hintText: {
+    fontSize: 13,
+    color: '#1565c0',
+    lineHeight: 20,
   },
   section: {
     marginBottom: 30,
@@ -692,13 +679,6 @@ const styles = StyleSheet.create({
   },
   formGroup: {
     marginBottom: 16,
-  },
-  halfWidth: {
-    width: '48%',
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
   },
   label: {
     fontSize: 14,
@@ -726,6 +706,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
   },
+  supplierIdBox: {
+    backgroundColor: '#f5f5f5',
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderStyle: 'dashed',
+  },
+  supplierIdText: {
+    fontSize: 16,
+    color: '#1976d2',
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  supplierIdPlaceholder: {
+    color: '#999',
+    fontWeight: '400',
+    fontStyle: 'italic',
+    fontFamily: Platform.OS === 'ios' ? undefined : 'sans-serif',
+  },
   saveButton: {
     backgroundColor: '#4caf50',
     padding: 16,
@@ -740,58 +740,6 @@ const styles = StyleSheet.create({
   saveButtonText: {
     color: 'white',
     fontSize: 18,
-    fontWeight: '600',
-  },
-  shelfSelector: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  shelfSelectorSingle: {
-    backgroundColor: '#4caf50',
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#4caf50',
-    alignItems: 'center',
-  },
-  shelfOption: {
-    flex: 1,
-    backgroundColor: 'white',
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    alignItems: 'center',
-    marginHorizontal: 4,
-  },
-  shelfOptionSelected: {
-    backgroundColor: '#4caf50',
-    borderColor: '#4caf50',
-  },
-  shelfOptionText: {
-    fontSize: 14,
-    color: '#333',
-  },
-  shelfOptionTextSelected: {
-    color: 'white',
-    fontWeight: '600',
-  },
-  importButton: {
-    flex: 1,
-    backgroundColor: '#007AFF',
-    padding: 16,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  scanButton: {
-    backgroundColor: '#ff9800',
-  },
-  importButtonDisabled: {
-    opacity: 0.5,
-  },
-  importButtonText: {
-    color: 'white',
-    fontSize: 16,
     fontWeight: '600',
   },
   positionButton: {
@@ -889,18 +837,12 @@ const styles = StyleSheet.create({
   positionItemTextCurrent: {
     color: '#e65100',
   },
-  positionItemDeviceName: {
-    fontSize: 8,
-    color: '#4caf50',
-    marginTop: 1,
-  },
   positionItemCurrentLabel: {
     fontSize: 8,
     color: '#ff9800',
     marginTop: 1,
   },
-
-  /* ===== 类目选择弹窗样式 ===== */
+  // 类目选择弹窗样式
   categoryCurrentLabel: {
     fontSize: 14,
     color: '#666',
@@ -971,4 +913,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default AdminEditScreen;
+export default NewDeviceScreen;

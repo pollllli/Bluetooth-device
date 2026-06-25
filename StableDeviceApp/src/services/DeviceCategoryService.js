@@ -816,6 +816,8 @@ export async function renameBigCategory(oldName, newName) {
   }
   target.name = trimmed;
   await saveCategories(list);
+  // 同步更新所有引用该大分类的器件，让器件上的类目标签实时跟随
+  await StorageService.renameBigCategoryInDevices(oldName, trimmed);
   return list;
 }
 
@@ -851,6 +853,8 @@ export async function renameSubCategory(bigName, oldSub, newSub) {
   }
   target.subCategories = target.subCategories.map((s) => (s === oldSub ? trimmed : s));
   await saveCategories(list);
+  // 同步更新所有引用该子类目的器件，让器件上的类目标签实时跟随
+  await StorageService.renameSubCategoryInDevices(oldSub, trimmed);
   return list;
 }
 
@@ -924,6 +928,8 @@ export async function deleteBigCategory(name) {
   }
   const newList = list.filter((c) => c.name !== name);
   await saveCategories(newList);
+  // 清空所有引用该大分类的器件类目字段（bigCategory + category 全部置空）
+  await StorageService.deleteBigCategoryInDevices(name);
   return newList;
 }
 
@@ -974,5 +980,8 @@ export async function deleteSubCategory(bigName, subName) {
   }
   target.subCategories = target.subCategories.filter((s) => s !== subName);
   await saveCategories(list);
+  // 清空所有引用该子类目的器件 category 字段
+  // bigCategory 保留 —— 大类本身未变，只是少了一个子项
+  await StorageService.deleteSubCategoryInDevices(subName);
   return list;
 }
