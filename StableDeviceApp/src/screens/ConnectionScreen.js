@@ -474,15 +474,17 @@ const styles = StyleSheet.create({
     paddingTop: 60,
   },
   header: {
-    backgroundColor: '#1976d2',
-    padding: 20,
+    backgroundColor: '#e0e0e0',
+    padding: 16,
     alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
     marginTop: 10,
   },
   title: {
-    fontSize: 24,
-    fontWeight: '600',
-    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#000',
   },
   connectionStatus: {
     flexDirection: 'row',
