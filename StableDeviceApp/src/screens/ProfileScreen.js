@@ -510,11 +510,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     color: '#999',
   },
-  logoutText: {
-    color: '#FF3B30',
-    fontWeight: 'bold',
-  },
-
   // 模态框样式
   modalOverlay: {
     flex: 1,

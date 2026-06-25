@@ -77,31 +77,6 @@ describe('StorageService', () => {
     });
   });
 
-  describe('用户管理', () => {
-    test('应该能够获取默认用户', async () => {
-      const users = await StorageService.getUsers();
-      
-      expect(Array.isArray(users)).toBe(true);
-      expect(users.length).toBeGreaterThanOrEqual(2);
-      
-      const admin = users.find(u => u.username === 'admin');
-      const user = users.find(u => u.username === 'user');
-      
-      expect(admin).not.toBeUndefined();
-      expect(admin.isAdmin).toBe(true);
-      expect(user).not.toBeUndefined();
-      expect(user.isAdmin).toBe(false);
-    });
-
-    test('应该能够根据用户名获取用户', async () => {
-      const admin = await StorageService.getUserByUsername('admin');
-      
-      expect(admin).not.toBeNull();
-      expect(admin.username).toBe('admin');
-      expect(admin.isAdmin).toBe(true);
-    });
-  });
-
   describe('搜索历史', () => {
     test('应该能够添加搜索历史', async () => {
       await StorageService.addSearchHistory('电阻');

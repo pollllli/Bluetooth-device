@@ -77,41 +77,6 @@ export const UserProvider = ({ children }) => {
     }
   };
 
-  const login = async (userData) => {
-    try {
-      await StorageService.saveLoggedInUser(userData);
-      setUser(userData);
-    } catch (error) {
-      logError('登录失败', error, 'UserProvider.login');
-      throw error;
-    }
-  };
-
-  const logout = async () => {
-    try {
-      await StorageService.removeLoggedInUser();
-      setUser(null);
-      // 退出登录时重置搜索参数
-      setSearchParams({
-        searchQuery: '',
-        selectedShelf: '',
-        advancedSearchParams: {
-          name: '',
-          category: '',
-          function: '',
-          resistance: '',
-          voltage: '',
-          capacitance: '',
-          inductance: '',
-          current: '',
-        },
-      });
-    } catch (error) {
-      logError('退出登录失败', error, 'UserProvider.logout');
-      throw error;
-    }
-  };
-
   const updateUser = async (updatedUser) => {
     try {
       await StorageService.saveLoggedInUser(updatedUser);
@@ -151,8 +116,6 @@ export const UserProvider = ({ children }) => {
     <UserContext.Provider
       value={{
         user,
-        login,
-        logout,
         updateUser,
         searchParams,
         updateSearchParams,

@@ -307,96 +307,6 @@ class StorageService {
   }
 
   /**
-   * 获取所有用户数据
-   * @returns {Promise<Array>} 用户数据数组
-   */
-  static async getUsers() {
-    try {
-      const cached = this.#getFromCache('users');
-      if (cached) return cached;
-
-      const users = await getData('users');
-      if (users) {
-        let needFix = false;
-        const fixedUsers = users.map((user) => {
-          if (user.username === 'admin' && user.isAdmin !== true) {
-            needFix = true;
-            return { ...user, isAdmin: true };
-          }
-          if (user.username === 'user' && user.isAdmin !== false) {
-            needFix = true;
-            return { ...user, isAdmin: false };
-          }
-          return user;
-        });
-
-        if (needFix) {
-          await this.saveUsers(fixedUsers);
-          this.#setToCache('users', fixedUsers);
-          return fixedUsers;
-        }
-
-        this.#setToCache('users', users);
-        return users;
-      } else {
-        const defaultUsers = [
-          {
-            username: 'admin',
-            password: 'admin',
-            isAdmin: true,
-            createdAt: new Date().toISOString(),
-          },
-          {
-            username: 'user',
-            password: 'user',
-            isAdmin: false,
-            createdAt: new Date().toISOString(),
-          },
-        ];
-        await this.saveUsers(defaultUsers);
-        return defaultUsers;
-      }
-    } catch (error) {
-      logError('获取用户数据失败', error, 'StorageService.getUsers');
-      return [];
-    }
-  }
-
-  /**
-   * 保存用户数据
-   * @param {Array} users - 用户数据数组
-   * @returns {Promise<void>}
-   */
-  static async saveUsers(users) {
-    try {
-      await saveData('users', users);
-      this.#setToCache('users', users);
-    } catch (error) {
-      logError('保存用户数据失败', error, 'StorageService.saveUsers');
-      throw error;
-    }
-  }
-
-  /**
-   * 根据用户名获取用户
-   * @param {string} username - 用户名
-   * @returns {Promise<Object|null>} 用户数据，未找到返回null
-   */
-  static async getUserByUsername(username) {
-    try {
-      const users = await this.getUsers();
-      return users.find((u) => u.username === username) || null;
-    } catch (error) {
-      logError(
-        '根据用户名获取用户失败',
-        error,
-        'StorageService.getUserByUsername'
-      );
-      return null;
-    }
-  }
-
-  /**
    * 保存上次连接的蓝牙设备信息
    * @param {Object} deviceInfo - 设备信息对象
    * @param {string} deviceInfo.deviceId - 设备ID
@@ -783,24 +693,6 @@ class StorageService {
     } catch (error) {
       logError('获取登录用户信息失败', error, 'StorageService.getLoggedInUser');
       return null;
-    }
-  }
-
-  /**
-   * 移除登录用户信息（登出）
-   * @returns {Promise<void>}
-   */
-  static async removeLoggedInUser() {
-    try {
-      await removeData('loggedInUser');
-      this.#clearCache('loggedInUser');
-    } catch (error) {
-      logError(
-        '移除登录用户信息失败',
-        error,
-        'StorageService.removeLoggedInUser'
-      );
-      throw error;
     }
   }
 
