@@ -54,10 +54,6 @@ StableDeviceApp/
 - **StorageUtils**：存储工具，提供统一的存储操作接口
 - **SearchUtils**：搜索工具，处理搜索相关的逻辑
 
-### 5. 可复用组件
-
-- **LoadingError**：加载状态和错误提示组件
-
 ## 数据流
 
 ### 数据存储
