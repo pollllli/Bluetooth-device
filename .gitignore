@@ -56,6 +56,13 @@ temp/
 *.log
 *.tmp
 
+# 项目主目录是 StableDeviceApp/，根目录不再有这些旧版目录
+/android/
+/assets/
+/src/
+/.git-rewrite/
+/export.txt
+
 # 测试文件
 test_response.html
 detail_page.html
