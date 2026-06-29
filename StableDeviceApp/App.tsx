@@ -19,6 +19,7 @@ import { File as NewFile } from 'expo-file-system';  // 新 API：支持 content
 import AppNavigator, { navigationRef } from './src/navigation/AppNavigator';
 import { UserProvider } from './src/context/UserContext';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import ErrorBoundary from './src/components/ErrorBoundary';
 import StorageService from './src/services/StorageService';
 import { logError } from './src/utils/ErrorHandler';
 import * as pendingBomImport from './src/utils/pendingBomImport';
@@ -412,6 +413,7 @@ export default function App() {
   };
 
   return (
+    <ErrorBoundary>
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaView style={styles.container}>
         <UserProvider>
@@ -521,6 +523,7 @@ export default function App() {
       </UserProvider>
       </SafeAreaView>
     </GestureHandlerRootView>
+    </ErrorBoundary>
   );
 }
 
