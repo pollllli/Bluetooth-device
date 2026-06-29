@@ -1,25 +1,20 @@
 /**
- * SwipeableRow - QQ 风格左滑显示操作按钮(基于 react-native-gesture-handler/Swipeable)
+ * SwipeableRow - 微信风格左滑显示操作按钮
  *
- * 相比自己写 PanResponder 的优势:
- * - 使用原生手势处理(native thread),不会因 forceUpdate / useNativeDriver 引发崩溃
- * - 多 Swipeable 实例同时挂载也安全
- * - 自动处理 unmount 时的手势清理
+ * 效果:
+ * - 轻轻左滑就判定手势成功(rightThreshold 极小)
+ * - 编辑按钮先从右侧出现(宽度 0->80 渐进)
+ * - 删除按钮随后从编辑按钮左侧出现(宽度 0->80 渐进)
+ * - 右滑时,删除按钮先消失(宽度 80->0),编辑按钮后消失
  *
- * 用法:
- *   <SwipeableRow onEdit={...} onDelete={...}>
- *     <TouchableOpacity>...</TouchableOpacity>
- *   </SwipeableRow>
- *
- * - 向左滑动显示右侧的"编辑"/"删除"按钮
- * - 点击按钮触发 onEdit / onDelete 回调
- * - 触发后自动 close()
+ * 基于 react-native-gesture-handler/Swipeable
  */
 import React, { useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
 import Swipeable from 'react-native-gesture-handler/Swipeable';
 
-const ACTION_WIDTH = 80;
+const ACTION_WIDTH = 80;     // 每个按钮宽度
+const RIGHT_WIDTH = ACTION_WIDTH * 2;  // 总共露出宽度 160
 
 const SwipeableRow = ({ children, onEdit, onDelete }) => {
   const swipeableRef = useRef(null);
@@ -34,33 +29,71 @@ const SwipeableRow = ({ children, onEdit, onDelete }) => {
     if (onDelete) onDelete();
   };
 
-  // 右侧 actions - 向左滑时显示
-  const renderRightActions = () => (
-    <View style={styles.actions}>
-      <TouchableOpacity
-        style={[styles.actionButton, styles.editButton]}
-        onPress={handleEdit}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.actionText}>编辑</Text>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={[styles.actionButton, styles.deleteButton]}
-        onPress={handleDelete}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.actionText}>删除</Text>
-      </TouchableOpacity>
-    </View>
-  );
+  // 渲染右侧 actions - 微信风格渐进式展开
+  // dragX 范围: 0 (关闭) 到 -RIGHT_WIDTH (完全打开)
+  const renderRightActions = (progress, dragX) => {
+    // 编辑按钮: 永远在右侧 (right: 0)
+    //   - 用户左滑 0-160px 时, 宽度 0 -> 80 渐进
+    const editWidth = dragX.interpolate({
+      inputRange: [-RIGHT_WIDTH, 0],
+      outputRange: [ACTION_WIDTH, 0],
+      extrapolate: 'clamp',
+    });
+
+    // 删除按钮: 永远在编辑按钮左边 (right: ACTION_WIDTH = 80)
+    //   - 用户左滑 0-80px 时: 删除按钮宽度保持 0
+    //   - 用户左滑 80-160px 时: 删除按钮宽度 0 -> 80
+    const deleteWidth = dragX.interpolate({
+      inputRange: [-RIGHT_WIDTH, -ACTION_WIDTH, 0],
+      outputRange: [ACTION_WIDTH, ACTION_WIDTH, 0],
+      extrapolate: 'clamp',
+    });
+
+    return (
+      <View style={styles.actionsContainer}>
+        {/* 删除按钮 - 在编辑按钮左边 */}
+        <Animated.View
+          style={[
+            styles.actionContainer,
+            { width: deleteWidth, right: ACTION_WIDTH },
+          ]}
+        >
+          <TouchableOpacity
+            style={[styles.actionButton, styles.deleteButton]}
+            onPress={handleDelete}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.actionText}>删除</Text>
+          </TouchableOpacity>
+        </Animated.View>
+
+        {/* 编辑按钮 - 在最右侧 */}
+        <Animated.View
+          style={[
+            styles.actionContainer,
+            { width: editWidth, right: 0 },
+          ]}
+        >
+          <TouchableOpacity
+            style={[styles.actionButton, styles.editButton]}
+            onPress={handleEdit}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.actionText}>编辑</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      </View>
+    );
+  };
 
   return (
     <Swipeable
       ref={swipeableRef}
       renderRightActions={renderRightActions}
-      friction={2}
-      rightThreshold={40}
-      overshootRight={false}
+      friction={1}              // 不减速, 拖多少走多少, 轻滑也能触发
+      rightThreshold={20}       // 滑过 20px 就判定为打开(微信风格)
+      overshootRight={false}    // 不允许过冲, 避免视觉跳变
+      useNativeAnimations       // 用原生线程动画(更流畅)
     >
       {children}
     </Swipeable>
@@ -68,12 +101,17 @@ const SwipeableRow = ({ children, onEdit, onDelete }) => {
 };
 
 const styles = StyleSheet.create({
-  actions: {
+  actionsContainer: {
+    flex: 1,
     flexDirection: 'row',
-    width: ACTION_WIDTH * 2,
+  },
+  actionContainer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
   },
   actionButton: {
-    width: ACTION_WIDTH,
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
   },
