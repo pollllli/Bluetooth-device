@@ -7,6 +7,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
 import { getCategories } from '../services/DeviceCategoryService';
 import { logError } from '../utils/ErrorHandler';
+import { findFirstEmptyPosition as findFirstEmptyPositionFromUtils, getOccupiedPositionMap } from '../utils/positionUtils';
 
 // 爬虫服务器地址保存到本地
 const CRAWLER_SERVER_KEY = 'crawlerServerAddress';
@@ -277,42 +278,18 @@ const ScanScreen = ({ navigation, route }) => {
     })();
   }, []);
 
-  // 查找器件架1中第一个空位置（0-89）
+  // 查找器件架1中第一个空位置（0-89）—— 包装共享工具
   const findFirstEmptyPosition = async () => {
     const devices = await StorageService.getDevices();
-    const occupiedPositions = new Set();
-    devices.forEach(d => {
-      if (d.shelfId === '1' && d.location != null && d.location !== '') {
-        // 统一转换为字符串比较
-        const pos = String(d.location);
-        if (pos) {
-          occupiedPositions.add(pos);
-        }
-      }
-    });
-    for (let i = 0; i < 90; i++) {
-      if (!occupiedPositions.has(String(i))) {
-        return String(i); // 返回字符串格式，与保存时一致
-      }
-    }
-    return null; // 器件架已满
+    return findFirstEmptyPositionFromUtils(devices, 90);
   };
 
   /**
-   * 加载已占用的位置映射（用于位置选择器中标记已占用的格子）
+   * 加载已占用的位置映射（用于位置选择器中标记已占用的格子）—— 使用共享工具
    */
   const loadOccupiedPositions = async () => {
     const devices = await StorageService.getDevices();
-    const occupied = new Map();
-    devices
-      .filter(d => d.shelfId === '1' && d.location != null && d.location !== '')
-      .forEach(d => {
-        const pos = parseInt(d.location, 10);
-        if (!isNaN(pos)) {
-          occupied.set(pos, d.name || '未知');
-        }
-      });
-    setOccupiedPositions(occupied);
+    setOccupiedPositions(getOccupiedPositionMap(devices));
   };
 
   /**

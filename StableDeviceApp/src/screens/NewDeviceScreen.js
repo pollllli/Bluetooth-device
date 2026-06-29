@@ -25,6 +25,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
 import { logError } from '../utils/ErrorHandler';
 import { getCategories } from '../services/DeviceCategoryService';
+import { findFirstEmptyPosition, getOccupiedPositionMap } from '../utils/positionUtils';
 
 const NewDeviceScreen = ({ navigation, route }) => {
   const { onSave } = route.params || {};
@@ -156,21 +157,8 @@ const NewDeviceScreen = ({ navigation, route }) => {
     }, [])
   );
 
-  const getOccupiedPositions = () => {
-    const occupied = new Map();
-    allDevices
-      .filter((d) => d.shelfId === '1' && d.location != null && d.location !== '')
-      .forEach((d) => {
-        const pos = parseInt(d.location, 10);
-        if (!isNaN(pos)) {
-          occupied.set(pos, d.name || '未知');
-        }
-      });
-    return occupied;
-  };
-
   const getAllPositions = () => {
-    const occupied = getOccupiedPositions();
+    const occupied = getOccupiedPositionMap(allDevices);
     const positions = [];
     for (let i = 0; i < 240; i++) {
       positions.push({
@@ -181,6 +169,24 @@ const NewDeviceScreen = ({ navigation, route }) => {
     }
     return positions;
   };
+
+  /**
+   * 自动填充第一个空位置（与扫码上架一致）:
+   * - 仅在 state.location 为空时生效
+   * - 优先查找 0-89 范围
+   * - 找到后同步生成 supplierId
+   * - 满架则保持 location 空,让用户手动选择
+   */
+  useEffect(() => {
+    if (allDevices.length === 0) return;       // 还在加载
+    if (state.location) return;                // 用户已选,跳过
+    const empty = findFirstEmptyPosition(allDevices, 90);
+    if (empty == null) return;                 // 满架,保持空让用户选
+    dispatch({
+      type: 'SET_FIELDS',
+      payload: { location: empty, supplierId: generateSupplierId(empty) },
+    });
+  }, [allDevices, state.location]);
 
   /**
    * 选中位置后：更新位置 + 自动生成 supplierId
