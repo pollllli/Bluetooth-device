@@ -96,7 +96,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
    * - SET_SHOW_SUGGESTIONS: 设置是否显示搜索建议
    * - SET_SUCCESS_MESSAGE: 设置成功提示消息
    * - SET_CONNECTED: 设置蓝牙连接状态
-   * - TOGGLE_DEVICE_SELECTION: 切换单个器件的选中状态
    * - CLEAR_SEARCH_HISTORY: 清除搜索历史
    * - SET_LOADING: 设置加载状态
    * - SET_LIT_DEVICE_IDS: 设置亮灯的器件ID列表
@@ -1799,22 +1798,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingVertical: 12,
-    gap: 8,
+    paddingVertical: 4,
+    gap: 4,
   },
   controlAllButton: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
-      height: 2,
+      height: 1,
     },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 1,
   },
   controlAllOnButton: {
     backgroundColor: '#4caf50',
