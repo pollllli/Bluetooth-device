@@ -38,6 +38,7 @@ import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { generateSearchSuggestions, filterDevices } from '../utils/SearchUtils';
 import { MaterialIcons } from '@expo/vector-icons';
 import { getCategories, DEVICE_CATEGORIES } from '../services/DeviceCategoryService';
+import SwipeableRow from '../components/SwipeableRow';
 
 const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   /**
