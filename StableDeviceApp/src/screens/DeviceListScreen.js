@@ -757,6 +757,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       return (
         <SwipeableRow
           key={item.id}
+          deviceName={item.name}
           onEdit={handleEdit}
           onDelete={() => handleDeleteDevice(item)}
         >
