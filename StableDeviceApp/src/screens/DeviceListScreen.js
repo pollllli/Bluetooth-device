@@ -1,12 +1,12 @@
 /**
  * 器件列表页面组件
- * 
+ *
  * 功能说明：
  * - 显示器件架中的所有器件
  * - 支持按类目筛选器件
  * - 支持搜索器件（按名称、编号、封装、分类等）
  * - 支持蓝牙亮灯定位器件位置
- * - 支持批量选择和批量删除
+ * - 支持左滑器件显示编辑/删除按钮（QQ 风格）
  * - 支持从Excel导入器件数据
  * - 支持扫码添加器件
  */
@@ -66,8 +66,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     devices: [],
     filteredDevices: [],
     searchQuery: '',
-    selectedDevices: [],
-    isSelectionMode: false,
     searchHistory: [],
     showSearchHistory: false,
     searchSuggestions: [],
@@ -121,14 +119,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         return { ...state, filteredDevices: action.payload };
       case 'SET_SEARCH_QUERY':
         return { ...state, searchQuery: action.payload };
-      case 'SET_SELECTED_DEVICES':
-        return { ...state, selectedDevices: action.payload };
-      case 'SET_SELECTION_MODE':
-        return {
-          ...state,
-          isSelectionMode: action.payload,
-          selectedDevices: [],  // 切换模式时清空选中列表
-        };
       case 'SET_SEARCH_HISTORY':
         return { ...state, searchHistory: action.payload };
       case 'SET_SHOW_SEARCH_HISTORY':
@@ -141,14 +131,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         return { ...state, successMessage: action.payload };
       case 'SET_CONNECTED':
         return { ...state, isConnected: action.payload };
-      case 'TOGGLE_DEVICE_SELECTION':
-        // 切换单个器件的选中状态
-        return {
-          ...state,
-          selectedDevices: state.selectedDevices.includes(action.payload)
-            ? state.selectedDevices.filter((id) => id !== action.payload)
-            : [...state.selectedDevices, action.payload],
-        };
       case 'CLEAR_SEARCH_HISTORY':
         return { ...state, searchHistory: [] };
       case 'SET_LOADING':
@@ -189,8 +171,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     devices,
     filteredDevices,
     searchQuery,
-    selectedDevices,
-    isSelectionMode,
     searchHistory,
     showSearchHistory,
     searchSuggestions,
@@ -708,64 +688,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     [devices, dispatch, showSuccessMessage, turnOffLightForPosition]
   );
 
-  // 批量删除器件
-  const handleBatchDelete = useCallback(() => {
-    if (selectedDevices.length === 0) {
-      Alert.alert('提示', '请先选择要删除的器件');
-      return;
-    }
-
-    Alert.alert(
-      '确认删除',
-      `确定要删除选中的 ${selectedDevices.length} 个器件吗？`,
-      [
-        { text: '取消', style: 'cancel' },
-        {
-          text: '删除',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              // 记录待删除的器件列表（需要在 filter 之前获取位置信息）
-              const devicesToDelete = devices.filter((d) =>
-                selectedDevices.includes(d.id)
-              );
-              const updatedDevices = devices.filter(
-                (d) => !selectedDevices.includes(d.id)
-              );
-              await StorageService.saveDevices(updatedDevices);
-              dispatch({ type: 'SET_DEVICES', payload: updatedDevices });
-              dispatch({ type: 'SET_SELECTION_MODE', payload: false });
-              // 灭灯：所有被删除器件对应的位置都发送 lightOff
-              const uniquePositions = new Set();
-              for (const d of devicesToDelete) {
-                if (d.location != null && d.location !== '') {
-                  uniquePositions.add(d.location);
-                }
-              }
-              for (const pos of uniquePositions) {
-                await turnOffLightForPosition(pos);
-              }
-              showSuccessMessage(`已删除 ${selectedDevices.length} 个器件`);
-            } catch (error) {
-              logError(
-                '批量删除器件失败',
-                error,
-                'DeviceListScreen.handleBatchDelete'
-              );
-              Alert.alert('错误', '删除器件失败');
-            }
-          },
-        },
-      ]
-    );
-  }, [selectedDevices, devices, dispatch, showSuccessMessage]);
-
-  /**
-   * 发送 lightOff 指令给下位机，使指定位置的灯熄灭
-   * 无论该位置灯当前是亮还是灭，都会发送一次（要求硬件幂等处理）
-   * - 蓝牙未连接时直接跳过（删除操作依然成功）
-   * - 位置为空/无效时跳过
-   */
+  // 发送 lightOff 指令给下位机，使指定位置的灯熄灭
+  // 无论该位置灯当前是亮还是灭，都会发送一次（要求硬件幂等处理）
+  // - 蓝牙未连接时直接跳过（删除操作依然成功）
+  // - 位置为空/无效时跳过
   const turnOffLightForPosition = useCallback(async (position) => {
     if (position == null || position === '') return;
     if (!global.deviceConnection || !global.deviceConnection.handler) return;
@@ -779,18 +705,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     }
   }, []);
 
-  // 切换选择模式
-  const toggleSelectionMode = useCallback(() => {
-    dispatch({ type: 'SET_SELECTION_MODE', payload: !isSelectionMode });
-  }, [isSelectionMode, dispatch]);
-
-  // 切换器件选择状态
-  const toggleDeviceSelection = useCallback(
-    (deviceId) => {
-      dispatch({ type: 'TOGGLE_DEVICE_SELECTION', payload: deviceId });
-    },
-    [dispatch]
-  );
 
   const showSuccessMessage = useCallback(
     (message) => {
@@ -818,7 +732,6 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
 
   const renderDeviceItem = useCallback(
     ({ item, index }) => {
-      const isSelected = selectedDevices.includes(item.id);
       const isLit = litDeviceIds.includes(item.id);
       let hardwarePosition;
       if (item.location != null && item.location !== '') {
@@ -829,11 +742,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       }
 
       const handlePress = () => {
-        if (isSelectionMode) {
-          toggleDeviceSelection(item.id);
-        } else {
-          handleDeviceTagPress(item, hardwarePosition);
-        }
+        handleDeviceTagPress(item, hardwarePosition);
       };
 
       const handleEdit = () => {
@@ -845,19 +754,18 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       };
 
       return (
-        <TouchableOpacity
-          style={[
-            styles.deviceTag,
-            isLit && styles.litDeviceTag,
-            isSelected && styles.selectedDeviceTag,
-          ]}
-          onPress={handlePress}
+        <SwipeableRow
+          key={item.id}
+          onEdit={handleEdit}
+          onDelete={() => handleDeleteDevice(item)}
         >
-          {/* 编辑图标：右上角 */}
-          <TouchableOpacity style={styles.editIcon} onPress={handleEdit}>
-            <MaterialIcons name="edit" size={14} color="#666" />
-          </TouchableOpacity>
-
+          <TouchableOpacity
+            style={[
+              styles.deviceTag,
+              isLit && styles.litDeviceTag,
+            ]}
+            onPress={handlePress}
+          >
           {/* 顶部行：编号 + 类目 */}
           <View style={styles.deviceTagTopRow}>
             {/* 编号 */}
@@ -897,13 +805,11 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
             </View>
           </View>
         </TouchableOpacity>
+        </SwipeableRow>
       );
     },
     [
-      selectedDevices,
-      isSelectionMode,
       litDeviceIds,
-      toggleDeviceSelection,
       handleDeviceTagPress,
       navigation,
       loadDevices,
@@ -1031,98 +937,34 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         )}
       </View>
 
-      {/* 管理员专属按钮：仅在多选模式下显示 全选/删除/取消（普通按钮已移至下方两行） */}
-      {isAdmin && isSelectionMode && (
-        <View style={styles.adminButtonsContainer}>
-          <TouchableOpacity
-            style={styles.cancelButton}
-            onPress={toggleSelectionMode}
-          >
-            <Text style={styles.cancelButtonText}>取消</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.selectAllButton}
-            onPress={() => {
-              const allIds = filteredDevices.map(d => d.id);
-              const allSelected = allIds.length > 0 && allIds.every(id => selectedDevices.includes(id));
-              dispatch({ type: 'SET_SELECTED_DEVICES', payload: allSelected ? [] : allIds });
-            }}
-          >
-            <Text style={styles.selectAllButtonText}>
-              {filteredDevices.length > 0 && filteredDevices.every(d => selectedDevices.includes(d.id)) ? '取消全选' : '全选'}
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.deleteButton,
-              selectedDevices.length === 0 && styles.disabledButton,
-            ]}
-            onPress={handleBatchDelete}
-            disabled={selectedDevices.length === 0}
-          >
-            <Text style={styles.deleteButtonText}>
-              删除 ({selectedDevices.length})
-            </Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* 第一行：扫码 + 新建器件（多选模式下管理员已显示专属按钮，普通用户显示删除/取消） */}
-      <View style={styles.controlAllButtonsContainer}>
-        {isSelectionMode && !isAdmin ? (
-          <>
-            <TouchableOpacity
-              style={[styles.controlAllButton, styles.deleteButton]}
-              onPress={handleBatchDelete}
-              disabled={selectedDevices.length === 0}
-            >
-              <Text style={styles.deleteButtonText}>
-                删除 ({selectedDevices.length})
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.controlAllButton, styles.cancelSelectButton]}
-              onPress={toggleSelectionMode}
-            >
-              <Text style={styles.cancelSelectButtonText}>取消</Text>
-            </TouchableOpacity>
-          </>
-        ) : !isSelectionMode ? (
-          <>
-            <TouchableOpacity
-              style={[styles.controlAllButton, styles.controlAllScanButton]}
-              onPress={() => navigation.navigate('ScanScreen')}
-            >
-              <Text style={styles.controlAllButtonText}>扫码</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.controlAllButton, styles.addButton]}
-              onPress={() =>
-                navigation.navigate('NewDevice', { onSave: loadDevices })
-              }
-            >
-              <Text style={styles.addButtonText}>新建器件</Text>
-            </TouchableOpacity>
-          </>
-        ) : null}
-      </View>
-
-      {/* 第二行：批量选择 + 点亮所有 + 熄灭所有 */}
+      {/* 第一行：扫码 + 新建器件 */}
       <View style={styles.controlAllButtonsContainer}>
         <TouchableOpacity
-          style={[styles.controlAllButton, styles.selectButton]}
-          onPress={toggleSelectionMode}
+          style={[styles.controlAllButton, styles.controlAllScanButton]}
+          onPress={() => navigation.navigate('ScanScreen')}
         >
-          <Text style={styles.selectButtonText}>批量选择</Text>
+          <Text style={styles.controlAllButtonText}>扫码</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.controlAllButton, styles.controlAllOnButton]}
+          style={[styles.controlAllButton, styles.addButton]}
+          onPress={() =>
+            navigation.navigate('NewDevice', { onSave: loadDevices })
+          }
+        >
+          <Text style={styles.addButtonText}>新建器件</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* 第二行：点亮所有 + 熄灭所有（1:1 等宽） */}
+      <View style={styles.controlAllLightsContainer}>
+        <TouchableOpacity
+          style={[styles.controlAllLightButton, styles.controlAllOnButton]}
           onPress={handleControlAllLightsOn}
         >
           <Text style={styles.controlAllButtonText}>点亮所有</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.controlAllButton, styles.controlAllOffButton]}
+          style={[styles.controlAllLightButton, styles.controlAllOffButton]}
           onPress={handleControlAllLightsOff}
         >
           <Text style={styles.controlAllButtonText}>熄灭所有</Text>
@@ -1142,15 +984,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         ) : memoizedFilteredDevices.length > 0 ? (
           <View style={styles.tagsGrid}>
             {memoizedFilteredDevices.map((item, index) => {
-              // 直接从 state 读取，确保选中状态变化时能够正确触发样式更新
-              const isSelected = state.selectedDevices.includes(item.id);
               return (
                 <View
                   key={item.id}
-                  style={[
-                    styles.tagWrapper,
-                    isSelected && { backgroundColor: 'rgba(255, 224, 224, 0.5)', borderRadius: 12 },
-                  ]}
+                  style={styles.tagWrapper}
                 >
                   {renderDeviceItem({ item, index })}
                 </View>
@@ -1730,68 +1567,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#333',
   },
-  // 管理员按钮样式
-  adminButtonsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginHorizontal: 16,
-    marginBottom: 16,
-  },
-  selectButton: {
-    backgroundColor: '#FF9500',
-    flex: 1,
-    marginLeft: 8,
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  selectButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  cancelButton: {
-    backgroundColor: '#8E8E93',
-    flex: 1,
-    marginRight: 4,
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  cancelButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  selectAllButton: {
-    backgroundColor: '#1976d2',
-    flex: 1,
-    marginHorizontal: 4,
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  selectAllButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  deleteButton: {
-    backgroundColor: '#FF3B30',
-    flex: 1,
-    marginLeft: 4,
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  deleteButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
   // 设备标签样式
   tagsContainer: {
     flex: 1,
@@ -1817,20 +1592,6 @@ const styles = StyleSheet.create({
     flexDirection: 'column',
     height: 90,
   },
-  selectedDeviceTag: {
-    // 批量选择模式下，选中器件时显示为淡红色背景，便于用户识别
-    backgroundColor: '#ffe0e0',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#ff9999',
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-  },
   litDeviceTag: {
     backgroundColor: '#98ee9cff',
     borderRadius: 12,
@@ -1841,13 +1602,6 @@ const styles = StyleSheet.create({
     },
     shadowOpacity: 0.08,
     shadowRadius: 8,
-  },
-  editIcon: {
-    position: 'absolute',
-    top: 2,
-    right: 2,
-    zIndex: 10,
-    padding: 4,
   },
   // 顶部行：编号 + 类目
   deviceTagTopRow: {
@@ -2064,11 +1818,9 @@ const styles = StyleSheet.create({
   },
   controlAllOnButton: {
     backgroundColor: '#4caf50',
-    flex: 2,
   },
   controlAllOffButton: {
     backgroundColor: '#f44336',
-    flex: 2,
   },
   controlAllScanButton: {
     backgroundColor: '#1976d2',
