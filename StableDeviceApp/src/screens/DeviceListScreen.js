@@ -96,6 +96,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
    * - SET_SHOW_SUGGESTIONS: 设置是否显示搜索建议
    * - SET_SUCCESS_MESSAGE: 设置成功提示消息
    * - SET_CONNECTED: 设置蓝牙连接状态
+   * - TOGGLE_DEVICE_SELECTION: 切换单个器件的选中状态
    * - CLEAR_SEARCH_HISTORY: 清除搜索历史
    * - SET_LOADING: 设置加载状态
    * - SET_LIT_DEVICE_IDS: 设置亮灯的器件ID列表
@@ -936,7 +937,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         )}
       </View>
 
-      {/* 第一行：扫码 + 新建器件 */}
+      {/* 第一行：扫码 + 新建器件（与第二行完全一致, 4 个按钮等高等宽） */}
       <View style={styles.controlAllButtonsContainer}>
         <TouchableOpacity
           style={[styles.controlAllButton, styles.controlAllScanButton]}
@@ -950,20 +951,20 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
             navigation.navigate('NewDevice', { onSave: loadDevices })
           }
         >
-          <Text style={styles.addButtonText}>新建器件</Text>
+          <Text style={styles.controlAllButtonText}>新建器件</Text>
         </TouchableOpacity>
       </View>
 
-      {/* 第二行：点亮所有 + 熄灭所有（1:1 等宽） */}
-      <View style={styles.controlAllLightsContainer}>
+      {/* 第二行：点亮所有 + 熄灭所有（1:1 等宽,与第一行完全一致） */}
+      <View style={styles.controlAllButtonsContainer}>
         <TouchableOpacity
-          style={[styles.controlAllLightButton, styles.controlAllOnButton]}
+          style={[styles.controlAllButton, styles.controlAllOnButton]}
           onPress={handleControlAllLightsOn}
         >
           <Text style={styles.controlAllButtonText}>点亮所有</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.controlAllLightButton, styles.controlAllOffButton]}
+          style={[styles.controlAllButton, styles.controlAllOffButton]}
           onPress={handleControlAllLightsOff}
         >
           <Text style={styles.controlAllButtonText}>熄灭所有</Text>
@@ -1793,27 +1794,19 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
-  // 控制所有灯按钮样式
+  // 控制所有灯/扫码/新建按钮样式 - 4 个按钮完全一致(高度/宽度/圆角/padding 都一样)
   controlAllButtonsContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     paddingHorizontal: 12,
     paddingVertical: 4,
-    gap: 4,
+    gap: 8,
   },
   controlAllButton: {
     flex: 1,
     paddingVertical: 10,
+    paddingHorizontal: 4,
     borderRadius: 8,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 1,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
-    elevation: 1,
   },
   controlAllOnButton: {
     backgroundColor: '#4caf50',
