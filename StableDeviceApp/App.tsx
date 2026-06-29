@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import {
   SafeAreaView,
   StyleSheet,
@@ -18,6 +18,7 @@ import { File as NewFile } from 'expo-file-system';  // 新 API：支持 content
 
 import AppNavigator, { navigationRef } from './src/navigation/AppNavigator';
 import { UserProvider } from './src/context/UserContext';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import StorageService from './src/services/StorageService';
 import { logError } from './src/utils/ErrorHandler';
 import * as pendingBomImport from './src/utils/pendingBomImport';
@@ -411,10 +412,10 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <UserProvider>
-        <AppNavigator />
-        <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView style={styles.container}>
+        <UserProvider>
+          <AppNavigator />
 
         {/* 外部应用分享 JSON 文件时的导入确认弹窗 */}
         <Modal
@@ -518,7 +519,8 @@ export default function App() {
           </View>
         </Modal>
       </UserProvider>
-    </SafeAreaView>
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 
