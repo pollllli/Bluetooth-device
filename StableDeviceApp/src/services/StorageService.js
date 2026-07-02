@@ -14,6 +14,11 @@ import {
 } from '../utils/StorageUtils';
 import { logError, handleAsyncError } from '../utils/ErrorHandler';
 import { getCategories as getEffectiveCategories } from './DeviceCategoryService';
+import { getShelves, getCurrentShelfId } from './ShelfService';
+import * as FileSystem from 'expo-file-system/legacy';
+
+// 导入的图片保存目录 (app 沙盒内, 跨设备可移植)
+const IMAGES_DIR = `${FileSystem.documentDirectory}images/`;
 
 /**
  * CSV行解析函数
@@ -176,9 +181,9 @@ class StorageService {
     try {
       const devices = await this.getDevices();
 
-      if (device.location != null && device.location !== '' && device.shelfId === '1') {
+      if (device.location != null && device.location !== '' && device.shelfId) {
         const conflict = devices.find(
-          (d) => d.location === device.location && d.shelfId === '1'
+          (d) => d.location === device.location && d.shelfId === device.shelfId
         );
         if (conflict) {
           throw new Error(
@@ -243,11 +248,11 @@ class StorageService {
     try {
       const devices = await this.getDevices();
 
-      if (updatedDevice.location != null && updatedDevice.location !== '' && updatedDevice.shelfId === '1') {
+      if (updatedDevice.location != null && updatedDevice.location !== '' && updatedDevice.shelfId) {
         const conflict = devices.find(
           (d) =>
             d.location === updatedDevice.location &&
-            d.shelfId === '1' &&
+            d.shelfId === updatedDevice.shelfId &&
             d.id !== updatedDevice.id
         );
         if (conflict) {
@@ -844,11 +849,58 @@ class StorageService {
   }
 
   /**
+   * 把图片 URI 读成 base64 字符串 (用于导出时嵌入 JSON)
+   * @param {string} uri - file://... / content://... / ph://...
+   * @returns {Promise<string|null>} base64 字符串, 失败返回 null
+   */
+  static async #readImageAsBase64(uri) {
+    if (!uri || typeof uri !== 'string') return null;
+    try {
+      // FileSystem.readAsStringAsync 支持 file:// 和 content://
+      // 鸿蒙/微信分享的 content URI 也能用 (走 ContentResolver)
+      return await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+    } catch (err) {
+      logError('读图片转 base64 失败', err, 'StorageService.#readImageAsBase64');
+      return null;
+    }
+  }
+
+  /**
+   * 把 base64 字符串写入 app 沙盒的 images/ 目录
+   * @param {string} base64
+   * @param {string} filename - 例 '12.jpg'
+   * @returns {Promise<string|null>} 沙盒 file:// URI, 失败返回 null
+   */
+  static async #writeBase64AsImage(base64, filename) {
+    if (!base64) return null;
+    try {
+      // 确保 images/ 目录存在
+      const dirInfo = await FileSystem.getInfoAsync(IMAGES_DIR);
+      if (!dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(IMAGES_DIR, { intermediates: true });
+      }
+      const filePath = `${IMAGES_DIR}${filename}`;
+      await FileSystem.writeAsStringAsync(filePath, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      return filePath;
+    } catch (err) {
+      logError('写 base64 到沙盒失败', err, 'StorageService.#writeBase64AsImage');
+      return null;
+    }
+  }
+
+  /**
    * 导出所有数据
+   * @param {Object} [options] - 导出选项
+   * @param {string} [options.shelfId] - 只导出指定库存的器件（按 shelfId 过滤），不传则导出全部
    * @returns {Promise<Object>} 包含所有数据的备份对象
    */
-  static async exportAllData() {
+  static async exportAllData(options = {}) {
     try {
+      const { shelfId } = options;
       const keys = ['devices', 'users', 'boms', 'searchHistory', 'formState'];
       const data = await this.batchGet(keys);
 
@@ -860,6 +912,58 @@ class StorageService {
       } catch (catErr) {
         logError('导出类目失败，使用默认类目', catErr, 'StorageService.exportAllData');
         data.categories = null;
+      }
+
+      // 关键: 如果指定了 shelfId, 只导出该库存的器件
+      if (shelfId && Array.isArray(data.devices)) {
+        const before = data.devices.length;
+        data.devices = data.devices.filter((d) => d && d.shelfId === shelfId);
+        data._filteredShelfId = shelfId; // 标记这是单库存导出
+        console.log(
+          `[exportAllData] 按 shelfId=${shelfId} 过滤器件: ${before} -> ${data.devices.length}`
+        );
+      }
+
+      // 关键: 导出库存列表 (含蓝牙绑定 MAC/名称), 用于接收方还原库存-蓝牙记忆
+      try {
+        const shelves = await getShelves();
+        data.shelves = shelves; // shelves[].bluetoothMac / bluetoothName 一起导出
+      } catch (shelfErr) {
+        logError('导出库存列表失败', shelfErr, 'StorageService.exportAllData');
+        data.shelves = null;
+      }
+
+      // 关键: 导出当前选中的库存 id
+      try {
+        data.currentShelfId = await getCurrentShelfId();
+      } catch (csErr) {
+        data.currentShelfId = null;
+      }
+
+      // 关键: 导出"上次连接的蓝牙设备" (库存页"重新连接"按钮依赖此字段)
+      // 没有这个的话, 接收方 app 里的"重新连接"按钮点不动 (getLastConnectedDevice 返回 null)
+      try {
+        data.lastConnectedDevice = await this.getLastConnectedDevice();
+      } catch (lcdErr) {
+        data.lastConnectedDevice = null;
+      }
+
+      // 关键: 把每张图片读成 base64 嵌入 JSON
+      // 否则接收方手机的 content:// URI 失效, 图片加载不出来
+      let embeddedImageCount = 0;
+      let failedImageCount = 0;
+      if (Array.isArray(data.devices)) {
+        for (const device of data.devices) {
+          if (device && device.image) {
+            const b64 = await this.#readImageAsBase64(device.image);
+            if (b64) {
+              device._imageBase64 = b64;
+              embeddedImageCount++;
+            } else {
+              failedImageCount++;
+            }
+          }
+        }
       }
 
       // 统计各数据条数，便于展示给用户
@@ -880,13 +984,17 @@ class StorageService {
             return false;
           }
         })(),
+        embeddedImageCount,
+        failedImageCount,
       };
 
       return {
         data,
         summary,
         exportDate: new Date().toISOString(),
-        version: '1.1.0',
+        // 1.3.0: 含 shelves 列表 + currentShelfId + 库存-蓝牙记忆 (bluetoothMac / bluetoothName)
+        // 关键: 必须是 1.3.0, 导入端才会在 importAllData 中还原库存列表与蓝牙绑定
+        version: '1.3.0',
         appVersion: '1.0.0',
       };
     } catch (error) {
@@ -896,11 +1004,32 @@ class StorageService {
   }
 
   /**
+   * 一次性导出多个库存, 返回多份独立 JSON 对象
+   * 每份 JSON 仅包含指定库存的器件, 其余数据(boms/users/categories)同样携带以便还原
+   * @param {Array<{id:string, name:string}>} shelves - 要导出的库存列表
+   * @returns {Promise<Array<{shelf: object, backup: object, fileName: string}>>}
+   */
+  static async exportShelves(shelves) {
+    if (!Array.isArray(shelves) || shelves.length === 0) {
+      throw new Error('未选择任何库存');
+    }
+    const result = [];
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    for (const shelf of shelves) {
+      const backup = await this.exportAllData({ shelfId: shelf.id });
+      const safeName = (shelf.name || '库存').replace(/[\\/:*?"<>|]/g, '_');
+      const fileName = `库存_${safeName}_${dateStr}.json`;
+      result.push({ shelf, backup, fileName });
+    }
+    return result;
+  }
+
+  /**
    * 导入备份数据
    * @param {Object} backupData - 备份数据对象
    * @param {Object} backupData.data - 要导入的数据
    * @param {string} [backupData.version] - 备份版本
-   * @returns {Promise<boolean>} 是否导入成功
+   * @returns {Promise<{restoredImageCount: number, failedImageCount: number}>}
    * @throws {Error} 如果备份数据无效或版本不兼容
    */
   static async importAllData(backupData) {
@@ -909,9 +1038,13 @@ class StorageService {
         throw new Error('无效的备份数据');
       }
 
-      // 验证备份数据版本（兼容 1.0.0 / 1.1.0）
+      // 验证备份数据版本 (兼容 1.0.0 / 1.1.0 / 1.2.0 / 1.3.0)
+      // 1.0.0: 无 categories 字段, 无图片
+      // 1.1.0: 含 categories 字段, 无图片
+      // 1.2.0: 含 categories 字段 + 器件图片 (base64 嵌入)
+      // 1.3.0: 含 shelves 列表 + currentShelfId + 库存-蓝牙记忆 (bluetoothMac/bluetoothName)
       const version = backupData.version || '1.0.0';
-      const supportedVersions = ['1.0.0', '1.1.0'];
+      const supportedVersions = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'];
       if (!supportedVersions.includes(version)) {
         throw new Error('备份数据版本不兼容');
       }
@@ -919,10 +1052,101 @@ class StorageService {
       // 1.0.0 没有 categories 字段，若用户已在另一台手机上自定义过类目，
       // 导入后那台手机的本地类目不会被覆盖（保持本地原有类目）
       // 1.1.0 始终包含 categories 字段，会完整覆盖
+      // 1.2.0 始终包含 categories 字段 + 器件图片
+
+      // 关键: 1.2.0 备份里器件图片是 _imageBase64 字段
+      // 我们需要把它解码写入本机沙盒, 把 device.image 替换为 file:// 沙盒路径
+      let restoredImageCount = 0;
+      let failedImageCount = 0;
+      // 1.2.0 / 1.3.0 都含 _imageBase64 图片, 都走图片恢复
+      if ((version === '1.2.0' || version === '1.3.0') && Array.isArray(backupData.data.devices)) {
+        for (const device of backupData.data.devices) {
+          if (device && device._imageBase64) {
+            const filename = `${device.id || Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+            const fileUri = await this.#writeBase64AsImage(device._imageBase64, filename);
+            if (fileUri) {
+              device.image = fileUri;   // 替换为沙盒 file:// URI
+              restoredImageCount++;
+            } else {
+              failedImageCount++;
+              device.image = '';        // 写入失败: 清除无效 URI
+            }
+            // 删除临时字段, 不存进 storage
+            delete device._imageBase64;
+          }
+        }
+      }
 
       // 批量保存数据
       await this.batchSet(backupData.data);
-      return true;
+
+      // 关键: 1.3.0 恢复库存列表 + 库存-蓝牙绑定 (bluetoothMac / bluetoothName)
+      if (version === '1.3.0' && Array.isArray(backupData.data.shelves) && backupData.data.shelves.length > 0) {
+        try {
+          // 1) 直接写 AsyncStorage (避开 ShelfService 内部缓存)
+          await saveData('shelves', backupData.data.shelves);
+          if (backupData.data.currentShelfId) {
+            await saveData('currentShelfId', backupData.data.currentShelfId);
+          }
+          console.log('[importAllData] 1.3.0 已恢复库存列表与蓝牙绑定, shelves.length=',
+            backupData.data.shelves.length);
+        } catch (shelfImportErr) {
+          logError('恢复库存列表失败', shelfImportErr, 'StorageService.importAllData');
+        }
+      }
+
+      // 关键: 1.3.0 恢复"上次连接的蓝牙设备" (库存页"重新连接"按钮依赖)
+      // 同时同步写入 currentShelf 的 bluetoothMac/bluetoothName, 保证切库自动连也用得上
+      if (version === '1.3.0' && backupData.data.lastConnectedDevice) {
+        try {
+          const lcd = backupData.data.lastConnectedDevice;
+          await this.saveLastConnectedDevice(lcd);
+          // 兜底: 把这个设备同步写到 currentShelf 上, 防止 shelves 没绑
+          if (lcd && (lcd.id || lcd.deviceId) && (lcd.name || lcd.deviceName)) {
+            try {
+              // 关键: 先清掉 ShelfService 的内存缓存, 下面的 getCurrentShelfId / getShelves
+              // 才会从 AsyncStorage 重新读取 (否则拿到的是导入前的旧数据, 会覆盖刚写入的 shelves)
+              try {
+                const ShelfService = require('./ShelfService');
+                if (ShelfService && typeof ShelfService.clearShelvesCache === 'function') {
+                  ShelfService.clearShelvesCache();
+                }
+              } catch (clearCacheErr) {
+                // ignore
+              }
+
+              const curShelfId = await getCurrentShelfId();
+              if (curShelfId) {
+                const allShelves = await getShelves();
+                const cur = allShelves.find((s) => s.id === curShelfId);
+                if (cur && !cur.bluetoothMac) {
+                  cur.bluetoothMac = lcd.id || lcd.deviceId;
+                  cur.bluetoothName = lcd.name || lcd.deviceName;
+                  await saveData('shelves', allShelves);
+                  // 同步清掉 ShelfService 缓存, 让下次读取拿到最新的
+                  try {
+                    const ShelfService = require('./ShelfService');
+                    if (ShelfService && typeof ShelfService.clearShelvesCache === 'function') {
+                      ShelfService.clearShelvesCache();
+                    }
+                  } catch (e) {}
+                  console.log('[importAllData] 已把 lastConnectedDevice 同步到当前库存的蓝牙绑定');
+                }
+              }
+            } catch (syncErr) {
+              console.warn('[importAllData] 同步 lastConnectedDevice 到当前库存失败:', syncErr);
+            }
+          }
+          console.log('[importAllData] 1.3.0 已恢复 lastConnectedDevice');
+        } catch (lcdErr) {
+          logError('恢复 lastConnectedDevice 失败', lcdErr, 'StorageService.importAllData');
+        }
+      }
+
+      // 清除 devices 缓存, 强制下次读取时重新加载 (新导入的图片路径立即生效)
+      this.#clearCache('devices');
+
+      return { restoredImageCount, failedImageCount };
     } catch (error) {
       logError('导入数据失败', error, 'StorageService.importAllData');
       throw error;
@@ -1057,8 +1281,10 @@ class StorageService {
           }
         }
 
-        // 全部默认放在器件架（一）
-        device.shelfId = '1';
+        // 多库存: 保留每个器件自身的 shelfId, 老数据(没有 shelfId 字段)默认放主库存
+        if (!device.shelfId) {
+          device.shelfId = '1';
+        }
 
         // 移除不需要的字段
         delete device.shelfid;
@@ -1066,23 +1292,26 @@ class StorageService {
         newDevices.push(device);
       }
 
-      // 检查位置冲突
-      const locationMap = {};
+      // 按 shelfId 分组检查位置冲突
       const existingDevices = await this.getDevices();
+      const locationMapByShelf = {};
       for (const ed of existingDevices) {
-        if (ed.location != null && ed.location !== '' && ed.shelfId === '1') {
-          locationMap[ed.location] = ed.name;
+        if (ed.location != null && ed.location !== '' && ed.shelfId) {
+          if (!locationMapByShelf[ed.shelfId]) locationMapByShelf[ed.shelfId] = {};
+          locationMapByShelf[ed.shelfId][ed.location] = ed.name;
         }
       }
 
       // 为没有location的器件自动分配空位置
       for (const device of newDevices) {
         if (device.location == null || device.location === '') {
+          const shelf = device.shelfId || '1';
+          if (!locationMapByShelf[shelf]) locationMapByShelf[shelf] = {};
           for (let pos = 0; pos < 90; pos++) {
             const posStr = String(pos);
-            if (!locationMap[posStr]) {
+            if (!locationMapByShelf[shelf][posStr]) {
               device.location = posStr;
-              locationMap[posStr] = device.name;
+              locationMapByShelf[shelf][posStr] = device.name;
               break;
             }
           }

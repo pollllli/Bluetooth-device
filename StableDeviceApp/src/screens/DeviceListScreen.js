@@ -23,6 +23,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   Alert,
   TextInput,
@@ -31,14 +32,23 @@ import {
   ActivityIndicator,
   SafeAreaView,
   Modal,
+  Image,
 } from 'react-native';
+// ⚠️ FlatList 必须用 react-native-gesture-handler 的!
+// 这是 Android 上 Swipeable 工作的关键: gesture-handler 的 FlatList
+// 内部把 ScrollView 换成自己的 createNativeWrapper 版本, native scroll view
+// 不会"吞掉"所有触摸, PanGestureHandler 才能正常检测到水平 pan.
+import { FlatList } from 'react-native-gesture-handler';
 import StorageService from '../services/StorageService';
 import BluetoothHandler from '../services/BluetoothHandler';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { generateSearchSuggestions, filterDevices } from '../utils/SearchUtils';
 import { MaterialIcons } from '@expo/vector-icons';
 import { getCategories, DEVICE_CATEGORIES } from '../services/DeviceCategoryService';
+import ShelfService from '../services/ShelfService';
 import SwipeableRow from '../components/SwipeableRow';
+import { consumePendingAutoConnect } from '../utils/pendingAutoConnect';
+import { autoConnectBluetooth } from '../utils/autoConnectBluetooth';
 
 const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   /**
@@ -80,6 +90,8 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     categoryFilterList: [],           // 类目筛选弹窗中的大类数据
     expandedCategoryFilterIndex: null, // 类目筛选弹窗中展开的大类索引
     categorySearchQuery: '',          // 类目搜索关键词
+    shelves: [],                       // 所有库存
+    currentShelfId: null,             // 当前选中的库存 id
   };
 
   /**
@@ -158,6 +170,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         return { ...state, expandedCategoryFilterIndex: action.payload };
       case 'SET_CATEGORY_SEARCH_QUERY':
         return { ...state, categorySearchQuery: action.payload };
+      case 'SET_SHELVES':
+        return { ...state, shelves: action.payload };
+      case 'SET_CURRENT_SHELF_ID':
+        return { ...state, currentShelfId: action.payload };
       default:
         return state;
     }
@@ -185,6 +201,8 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     categoryFilterList,
     expandedCategoryFilterIndex,
     categorySearchQuery,
+    shelves,
+    currentShelfId,
   } = state;
 
   useEffect(() => {
@@ -217,11 +235,43 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   useFocusEffect(
     useCallback(() => {
       console.log('DeviceListScreen获得焦点，重新加载数据');
-      
+
+      // 关键: 检查是否有"待自动连"的 pending (导入数据后)
+      // 有则在**当前页面后台自动连**, 不跳转到连接页
+      // 用户通过右上角的"未连接/已连接"状态胶囊观察连接结果
+      const pending = consumePendingAutoConnect();
+      if (pending.mac) {
+        console.log('[DeviceListScreen] 检测到待自动连, 后台连接:', pending.mac);
+        // 后台静默连, 失败仅 console.warn, 不弹 Alert 不导航
+        autoConnectBluetooth(pending.mac, pending.name).then((result) => {
+          if (result.ok) {
+            console.log('[DeviceListScreen] 后台自动连成功, 刷新连接状态');
+            // 立即更新本组件的 status badge 为"已连接" (右上角胶囊)
+            dispatch({ type: 'SET_CONNECTED', payload: true });
+          } else {
+            console.warn('[DeviceListScreen] 后台自动连失败:', result.reason);
+          }
+        });
+      }
+
       const currentSearchQuery = searchQuery;
-      
+
+      // 每次焦点都重新加载当前库存和库存列表 (用户在设置页可能切了/改了库存)
+      (async () => {
+        try {
+          const [shelves, currentId] = await Promise.all([
+            ShelfService.getShelves(),
+            ShelfService.getCurrentShelfId(),
+          ]);
+          dispatch({ type: 'SET_SHELVES', payload: shelves });
+          dispatch({ type: 'SET_CURRENT_SHELF_ID', payload: currentId });
+        } catch (err) {
+          console.warn('加载库存列表失败', err);
+        }
+      })();
+
       loadDevices();
-      
+
       setTimeout(() => {
         if (currentSearchQuery.trim() !== '') {
           const filtered = filterDevices(devices, currentSearchQuery, '');
@@ -509,9 +559,13 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   );
 
   // 使用 useMemo 缓存过滤后的设备列表
-  // 过滤规则：先按类目筛选（如果已选），再按搜索关键字筛选
+  // 过滤规则：先按当前库存, 再按类目, 再按搜索关键字
   const memoizedFilteredDevices = useMemo(() => {
     let result = devices;
+    // 0. 按当前库存过滤 (多库存功能)
+    if (currentShelfId) {
+      result = result.filter((device) => device.shelfId === currentShelfId);
+    }
     // 1. 按类目筛选
     if (selectedCategory) {
       result = result.filter(
@@ -521,12 +575,163 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     // 2. 按搜索关键字筛选
     result = filterDevices(result, searchQuery, '');
     return result;
-  }, [devices, searchQuery, selectedCategory]);
+  }, [devices, searchQuery, selectedCategory, currentShelfId]);
 
   // 使用 useMemo 缓存搜索建议
   const memoizedSearchSuggestions = useMemo(() => {
     return generateSearchSuggestions(searchQuery, devices, searchHistory, 5);
   }, [devices, searchHistory, searchQuery]);
+
+  // 当前库存名 (用于顶部小标签显示, 只读)
+  const currentShelfName = useMemo(() => {
+    if (!currentShelfId) return null;
+    const s = shelves.find((x) => x.id === currentShelfId);
+    return s ? s.name : null;
+  }, [shelves, currentShelfId]);
+
+  // ========== 库存切换 BottomSheet 相关（仅切换, 不含增删改） ==========
+  const [showShelfSheet, setShowShelfSheet] = useState(false);
+  const [shelfSheetList, setShelfSheetList] = useState([]); // [{id, name, deviceCount}]
+
+  const handleOpenShelfSheet = useCallback(async () => {
+    try {
+      const [list, devices] = await Promise.all([
+        ShelfService.getShelves(),
+        StorageService.getDevices(),
+      ]);
+      const enriched = list.map((s) => ({
+        ...s,
+        deviceCount: devices.filter((d) => d.shelfId === s.id).length,
+      }));
+      setShelfSheetList(enriched);
+      setShowShelfSheet(true);
+    } catch (err) {
+      Alert.alert('错误', '加载库存列表失败');
+    }
+  }, []);
+
+  const handleCloseShelfSheet = useCallback(() => {
+    setShowShelfSheet(false);
+  }, []);
+
+  const handleSwitchShelfFromSheet = useCallback(
+    async (shelf) => {
+      try {
+        // 修复: 误触当前库存时直接关闭弹窗, 不应触发"断蓝牙/重新连"的弹窗
+        if (shelf.id === currentShelfId) {
+          setShowShelfSheet(false);
+          return;
+        }
+        // 方案 A+D: 库存绑定蓝牙, 切库时优先自动连回该库存的 MAC
+        const handler = global.deviceConnection?.handler;
+        const currentMac = handler?.getCurrentMac ? handler.getCurrentMac() : null;
+        const isCurrentlyConnected = !!currentMac;
+        // 读取目标库存是否已绑定蓝牙
+        const targetBluetooth = await ShelfService.getShelfBluetooth(shelf.id);
+
+        // 切库 (无蓝牙动作)
+        const doSwitch = async () => {
+          await ShelfService.setCurrentShelfId(shelf.id);
+          dispatch({ type: 'SET_CURRENT_SHELF_ID', payload: shelf.id });
+          setShowShelfSheet(false);
+          loadDevices();
+        };
+
+        // 路径 1: 目标库存已绑定蓝牙 + 切过去会断开当前 -> 弹窗问 "是否自动连"
+        if (targetBluetooth && (isCurrentlyConnected || true)) {
+          // 提示文案根据当前连接情况调整
+          const currentLabel = isCurrentlyConnected
+            ? `\n当前连接的蓝牙将被断开。`
+            : '';
+          const label = targetBluetooth.name || targetBluetooth.mac;
+
+          const tryAutoConnect = async () => {
+            await doSwitch();
+            // 跳到连接页并传 autoConnectMac, 让连接页直接连接而不弹扫描
+            navigation.navigate('Connection', {
+              action: 'switchShelf',
+              targetShelfId: shelf.id,
+              autoConnectMac: targetBluetooth.mac,
+              autoConnectName: targetBluetooth.name,
+            });
+          };
+
+          Alert.alert(
+            '切换库存',
+            `切换到 "${shelf.name}", 该库存已绑定蓝牙 "${label}"。${currentLabel}\n\n是否自动连接该蓝牙？`,
+            [
+              { text: '取消', style: 'cancel' },
+              {
+                text: '手动选择',
+                onPress: async () => {
+                  // 手动选: 切库 + 断开(如有) + 跳扫描
+                  try {
+                    if (isCurrentlyConnected && handler && typeof handler.disconnect === 'function') {
+                      await handler.disconnect();
+                    }
+                  } catch (e) { /* 忽略 */ }
+                  await doSwitch();
+                  navigation.navigate('Connection', {
+                    action: 'switchShelf',
+                    targetShelfId: shelf.id,
+                    autoScan: true,
+                    autoScanAt: Date.now(),
+                  });
+                },
+              },
+              {
+                text: '自动连接',
+                onPress: () => {
+                  tryAutoConnect().catch((err) => Alert.alert('切库失败', err.message || '请重试'));
+                },
+              },
+            ]
+          );
+          return;
+        }
+
+        // 路径 2: 目标库存未绑定蓝牙 -> 切库 + (如有连) 断开 + 跳扫描页
+        const doSwitchAndGoScan = async () => {
+          try {
+            if (isCurrentlyConnected && handler && typeof handler.disconnect === 'function') {
+              await handler.disconnect();
+            }
+          } catch (e) {
+            console.warn('断开蓝牙失败, 继续切库:', e);
+          }
+          await doSwitch();
+          navigation.navigate('Connection', {
+            action: 'switchShelf',
+            targetShelfId: shelf.id,
+            autoScan: true,
+            autoScanAt: Date.now(),
+          });
+        };
+
+        if (isCurrentlyConnected) {
+          Alert.alert(
+            '切换库存',
+            `切换到 "${shelf.name}" 将断开当前蓝牙连接，需要重新扫描选择蓝牙模块。\n\n是否继续？`,
+            [
+              { text: '取消', style: 'cancel' },
+              {
+                text: '确认',
+                onPress: () => {
+                  doSwitchAndGoScan().catch((err) => Alert.alert('切库失败', err.message || '请重试'));
+                },
+              },
+            ]
+          );
+        } else {
+          await doSwitchAndGoScan();
+        }
+      } catch (err) {
+        Alert.alert('切换失败', err.message);
+      }
+    },
+    [dispatch, loadDevices, navigation, currentShelfId]
+  );
+
 
   // 【类目筛选】打开下拉弹窗：重新加载类目，默认展开当前已选类目所在的大类
   const handleOpenCategoryFilter = useCallback(async () => {
@@ -757,57 +962,106 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       return (
         <SwipeableRow
           key={item.id}
-          deviceName={item.name}
-          tagStyle={styles.deviceTag}
           onEdit={handleEdit}
           onDelete={() => handleDeleteDevice(item)}
         >
-          <TouchableOpacity
-            style={[
-              styles.deviceTag,
-              isLit && styles.litDeviceTag,
-            ]}
+          <Pressable
+            style={[styles.deviceTag, isLit && styles.litDeviceTag]}
             onPress={handlePress}
+            delayPressIn={150}
           >
-          {/* 顶部行：编号 + 类目 */}
-          <View style={styles.deviceTagTopRow}>
-            {/* 编号 */}
-            <View style={styles.deviceTagTopLeft}>
-              <Text style={styles.deviceTagValueTop} numberOfLines={1}>
-                {item.supplierId || '-'}
-              </Text>
+            {/* 左侧方图（方角）：用户上传图 / 默认占位 */}
+            <View style={styles.deviceTagImageWrap}>
+              {item.image ? (
+                <Image
+                  source={{ uri: item.image }}
+                  style={styles.deviceTagImage}
+                  resizeMode="cover"
+                />
+              ) : (
+                // 默认占位图：assets/device-default.png
+                // （用户已放入, 这里用 require 直接打包进 APK）
+                <Image
+                  source={require('../../assets/device-default.png')}
+                  style={styles.deviceTagImage}
+                  resizeMode="contain"
+                />
+              )}
             </View>
-            {/* 类目 */}
-            <View style={styles.deviceTagTopRight}>
-              <Text style={styles.deviceTagCategory} numberOfLines={1}>
-                {item.category || '-'}
-              </Text>
-            </View>
-          </View>
 
-          {/* 中间：名称（大字蓝色，最突出） */}
-          <View style={styles.deviceTagCenter}>
-            <Text style={styles.deviceTagName} numberOfLines={1}>
-              {item.name || '未命名'}
-            </Text>
-          </View>
-
-          {/* 底部行：位置 + 数量 */}
-          <View style={styles.deviceTagBottomRow}>
-            {/* 位置 */}
-            <View style={styles.deviceTagBottomLeft}>
-              <Text style={styles.deviceTagValueBottom} numberOfLines={1}>
-                {hardwarePosition != null ? hardwarePosition : '-'}
-              </Text>
+            {/* 右侧字段堆叠:
+                1. 编号(左) + 类目(右)
+                2. 器件名称(居中)
+                3. 位置(左) + 数量(右, 带 x 前缀) */ }
+            <View style={styles.deviceTagContent}>
+              {/* 1. 编号 + 类目
+                  - 编号 flexShrink:0 永远完整, 优先级最高
+                  - 类目 flex:1 强制占据剩余空间 + textAlign:'right' 始终贴右
+                  - 类目 marginLeft:24 = 距编号 2 字符宽 (12px 字号 × 2)
+                  - ellipsizeMode:'tail' 长时从右省略(省略号也在右) */ }
+              <View style={styles.deviceTagRowTop}>
+                <Text
+                  style={[styles.deviceTagMeta, { flexShrink: 0 }]}
+                  numberOfLines={1}
+                >
+                  {item.supplierId || '无编号'}
+                </Text>
+                <Text
+                  style={[
+                    styles.deviceTagMeta,
+                    {
+                      flex: 1,              // 强制占据剩余空间(关键)
+                      marginLeft: 24,        // 2 字符宽度间距
+                      textAlign: 'right',    // 内容在自身宽度内始终靠右
+                    },
+                  ]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"      // 长时从右省略
+                >
+                  {item.category || '未分类'}
+                </Text>
+              </View>
+              {/* 2. 器件名称（居中, 蓝色, 大字号） */}
+              <View style={styles.deviceTagNameCenter}>
+                <Text
+                  style={[
+                    styles.deviceTagName,
+                    isLit && styles.deviceTagNameLit,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {item.name || '未命名'}
+                </Text>
+              </View>
+              {/* 3. 位置 + 数量(带 × 前缀)
+                  - 位置 flexShrink:0 永远完整
+                  - 数量 flex:1 强制占据剩余空间, 始终贴右
+                  - 数量 marginLeft:24 = 距位置 2 字符宽
+                  - 长时省略号也在右 */ }
+              <View style={styles.deviceTagRowBottom}>
+                <Text
+                  style={[styles.deviceTagMeta, { flexShrink: 0 }]}
+                  numberOfLines={1}
+                >
+                  {hardwarePosition != null ? `位置 ${hardwarePosition}` : ''}
+                </Text>
+                <Text
+                  style={[
+                    styles.deviceTagMeta,
+                    {
+                      flex: 1,
+                      marginLeft: 24,
+                      textAlign: 'right',
+                    },
+                  ]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
+                  ×{item.quantity || 1}
+                </Text>
+              </View>
             </View>
-            {/* 数量 */}
-            <View style={styles.deviceTagBottomRight}>
-              <Text style={styles.deviceTagQuantity} numberOfLines={1}>
-                {item.quantity || 1}
-              </Text>
-            </View>
-          </View>
-        </TouchableOpacity>
+          </Pressable>
         </SwipeableRow>
       );
     },
@@ -827,7 +1081,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     <SafeAreaView style={styles.container}>
       {/* 标题和蓝牙连接状态 */}
       <View style={styles.shelfSelectorContainer}>
-        {/* 左上角：可点击的类目筛选器 */}
+        {/* 左上角：类目筛选 (恢复原样) */}
         <TouchableOpacity
           style={styles.shelfSelectorButton}
           onPress={handleOpenCategoryFilter}
@@ -838,7 +1092,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
               <Text style={styles.shelfSelectorText} numberOfLines={1}>
                 类目：{selectedCategory}
               </Text>
-              {/* 清除筛选的 ✕ 按钮（再次点击这里 = 回到全部器件） */}
+              {/* 清除筛选的 ✕ 按钮 */}
               <TouchableOpacity
                 style={styles.shelfSelectorClearButton}
                 onPress={handleQuickClearCategory}
@@ -974,47 +1228,42 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         </TouchableOpacity>
       </View>
 
-      {/* 设备标签列表 */}
-      <ScrollView
+      {/* 设备标签列表 - 必须用 FlatList（参考 settings.tsx）
+          原因: react-native-gesture-handler 的 Swipeable (横向 pan 手势)
+          不能放在普通 ScrollView 里, 会和纵向滚动手势冲突导致左滑失效.
+          FlatList 内部对 gesture-handler 做了集成, 左滑才能正常工作. */}
+      <FlatList
         style={styles.tagsContainer}
+        data={memoizedFilteredDevices}
+        keyExtractor={(item) => item.id}
+        renderItem={renderDeviceItem}
+        ItemSeparatorComponent={() => <View style={styles.tagDivider} />}
+        contentContainerStyle={styles.tagsList}
         showsVerticalScrollIndicator={true}
-      >
-        {isLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#1976d2" />
-            <Text style={styles.loadingText}>加载器件数据中...</Text>
-          </View>
-        ) : memoizedFilteredDevices.length > 0 ? (
-          <View style={styles.tagsGrid}>
-            {memoizedFilteredDevices.map((item, index) => {
-              return (
-                <View
-                  key={item.id}
-                  style={styles.tagWrapper}
-                >
-                  {renderDeviceItem({ item, index })}
-                </View>
-              );
-            })}
-            {/* 添加一个底部空白，确保最后一行标签完全可见 */}
-            <View style={{ height: 20 }} />
-          </View>
-        ) : (
-          <View style={styles.emptyContainer}>
-            <View style={styles.emptyIconContainer}>
-              <Text style={styles.emptyIcon}>🔍</Text>
+        ListEmptyComponent={
+          isLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#1976d2" />
+              <Text style={styles.loadingText}>加载器件数据中...</Text>
             </View>
-            <Text style={styles.emptyTitle}>
-              {searchQuery.trim() ? '未找到匹配的器件' : '暂无器件数据'}
-            </Text>
-            <Text style={styles.emptySubtitle}>
-              {searchQuery.trim()
-                ? '请尝试使用其他关键词搜索，或检查拼写是否正确'
-                : '请点击"新建器件"或"扫码"按钮添加器件'}
-            </Text>
-          </View>
-        )}
-      </ScrollView>
+          ) : (
+            <View style={styles.emptyContainer}>
+              <View style={styles.emptyIconContainer}>
+                <Text style={styles.emptyIcon}>🔍</Text>
+              </View>
+              <Text style={styles.emptyTitle}>
+                {searchQuery.trim() ? '未找到匹配的器件' : '暂无器件数据'}
+              </Text>
+              <Text style={styles.emptySubtitle}>
+                {searchQuery.trim()
+                  ? '请尝试使用其他关键词搜索，或检查拼写是否正确'
+                  : '请点击"新建器件"或"扫码"按钮添加器件'}
+              </Text>
+            </View>
+          )
+        }
+        ListFooterComponent={<View style={{ height: 20 }} />}
+      />
 
       {/* 成功反馈提示 */}
       {successMessage && (
@@ -1201,6 +1450,74 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           </View>
         </View>
       </Modal>
+
+      {/* 库存切换 FAB: 左下角圆形 + 按钮 (绝对定位, 不影响列表滚动) */}
+      <TouchableOpacity
+        style={styles.shelfFab}
+        onPress={handleOpenShelfSheet}
+        activeOpacity={0.8}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Text style={styles.shelfFabIcon}>⇄</Text>
+      </TouchableOpacity>
+
+      {/* 库存切换 BottomSheet: 从屏幕下方上滑弹出, 最大占屏幕一半高度 (仅切换) */}
+      {showShelfSheet && (
+        <View style={styles.bottomSheetBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={handleCloseShelfSheet}
+          />
+          <View style={styles.bottomSheetContent}>
+            <View style={styles.bottomSheetHandle} />
+            <View style={styles.bottomSheetHeader}>
+              <Text style={styles.bottomSheetTitle}>切换库存</Text>
+              <TouchableOpacity onPress={handleCloseShelfSheet}>
+                <Text style={styles.bottomSheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 库存列表（仅切换） */}
+            <ScrollView style={styles.bottomSheetList} keyboardShouldPersistTaps="handled">
+              {shelfSheetList.map((shelf) => {
+                const isCurrent = shelf.id === currentShelfId;
+                return (
+                  <TouchableOpacity
+                    key={shelf.id}
+                    style={[styles.bottomSheetItem, isCurrent && styles.bottomSheetItemActive]}
+                    onPress={() => handleSwitchShelfFromSheet(shelf)}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={[
+                        styles.bottomSheetRadio,
+                        isCurrent && styles.bottomSheetRadioActive,
+                      ]}
+                    >
+                      {isCurrent && <View style={styles.bottomSheetRadioDot} />}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[
+                          styles.bottomSheetItemName,
+                          isCurrent && styles.bottomSheetItemNameActive,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {shelf.name}
+                      </Text>
+                      <Text style={styles.bottomSheetItemMeta}>
+                        {shelf.deviceCount} 个器件
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 };
@@ -1286,6 +1603,117 @@ const styles = StyleSheet.create({
   shelfSelectorTextWithArrow: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+
+  // ===== 库存切换 FAB + BottomSheet =====
+  shelfFab: {
+    position: 'absolute',
+    left: 20,
+    bottom: 18, // 紧贴底部 tab 栏上方 (避免误触, 视觉上与"库存"tab 对齐)
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#1976d2',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 8,
+  },
+  shelfFabIcon: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '500',
+    lineHeight: 30,
+  },
+  bottomSheetBackdrop: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  bottomSheetContent: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    maxHeight: '50%', // 关键: 最大屏幕一半
+    paddingBottom: 16,
+  },
+  bottomSheetHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: '#ddd',
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 8,
+  },
+  bottomSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  bottomSheetTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  bottomSheetClose: {
+    fontSize: 18,
+    color: '#999',
+    paddingHorizontal: 8,
+  },
+  bottomSheetList: {
+    maxHeight: 280, // 列表区最大高度, 超出滚动
+  },
+  bottomSheetItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  bottomSheetItemActive: {
+    backgroundColor: '#e3f2fd',
+  },
+  bottomSheetRadio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#ccc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  bottomSheetRadioActive: {
+    borderColor: '#1976d2',
+  },
+  bottomSheetRadioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#1976d2',
+  },
+  bottomSheetItemName: {
+    fontSize: 15,
+    color: '#333',
+  },
+  bottomSheetItemNameActive: {
+    color: '#1976d2',
+    fontWeight: '600',
+  },
+  bottomSheetItemMeta: {
+    fontSize: 11,
+    color: '#999',
+    marginTop: 2,
   },
   // "类目：xxx ✕" 横排布局
   shelfSelectorTextWithClear: {
@@ -1573,123 +2001,112 @@ const styles = StyleSheet.create({
   // 设备标签样式
   tagsContainer: {
     flex: 1,
-    padding: 16,
+    // 微信风格: item 直接连接屏幕左右边缘, 不要 padding
   },
-  tagsGrid: {
-    flexDirection: 'column',
+  // FlatList contentContainerStyle: 第一个器件标签与上方按钮加大间距
+  tagsList: {
+    paddingTop: 12,
   },
-  tagWrapper: {
-    marginBottom: 12,
+  // 微信风格: item 之间用灰色横线分隔
+  tagDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#e0e0e0',
   },
   deviceTag: {
     backgroundColor: 'white',
-    borderRadius: 12,
+    // 微信风格: 无圆角, 无阴影
     padding: 12,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    flexDirection: 'column',
-    height: 90,
+    flexDirection: 'row',
+    alignItems: 'flex-start',  // 与图片顶端对齐, 后续 space-between 才能精确贴顶/贴底
+    minHeight: 94,  // 70 (方图) + 12*2 (padding)
+    position: 'relative',
   },
   litDeviceTag: {
     backgroundColor: '#98ee9cff',
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
+    // 微信风格: 无圆角, 无阴影
   },
-  // 顶部行：编号 + 类目
-  deviceTagTopRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 4,
-  },
-  // 顶部左侧：编号
-  deviceTagTopLeft: {
-    flexShrink: 0,
-    paddingRight: 12,
-  },
-  // 顶部右侧：类目（可向左扩展）
-  deviceTagTopRight: {
-    flex: 1,
-    paddingRight: 24,
-  },
-  // 中间：名称
-  deviceTagCenter: {
+  // 左侧方图(圆角, 固定 70x70)
+  deviceTagImageWrap: {
+    width: 70,
+    height: 70,
+    borderRadius: 10,  // 圆角
+    backgroundColor: '#f0f0f0',
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    marginRight: 12,
+    overflow: 'hidden',
     justifyContent: 'center',
     alignItems: 'center',
-    marginVertical: 4,
   },
-  // 底部行：位置 + 数量
-  deviceTagBottomRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
+  deviceTagImage: {
+    width: '100%',
+    height: '100%',
+  },
+  // 默认占位（用户未上传图片时显示）
+  deviceTagImagePlaceholder: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#fafafa',
+  },
+  deviceTagImagePlaceholderIcon: {
+    fontSize: 22,
+    opacity: 0.6,
+  },
+  deviceTagImagePlaceholderText: {
+    fontSize: 10,
+    color: '#999',
+    marginTop: 2,
+  },
+  // 右侧字段堆叠容器(3 行: 编号+类目 / 名称 / 位置+数量)
+  // 高度显式 = 70 (与图片同高), space-between 让首行贴顶/末行贴底/名称居中
+  deviceTagContent: {
+    flex: 1,
+    height: 70,
     justifyContent: 'space-between',
-    marginTop: 4,
   },
-  // 底部左侧：位置
-  deviceTagBottomLeft: {
-    flexShrink: 0,
-  },
-  // 底部右侧：数量
-  deviceTagBottomRight: {
-    flexShrink: 0,
-  },
-  // 顶部值（编号）
-  deviceTagValueTop: {
+  // 普通字段(小字号)
+  deviceTagMeta: {
     fontSize: 12,
     color: '#666',
-    flexShrink: 1,
-    textAlign: 'left',
-    marginTop: -4,
+    lineHeight: 16,
   },
-  // 类目（右对齐，过长时从右侧省略）
-  deviceTagCategory: {
-    fontSize: 12,
-    color: '#666',
-    flexShrink: 1,
-    textAlign: 'right',
-    ellipsizeMode: 'tail',
-    marginTop: -4,
+  // 第一行: 编号 + 类目(flex 同行, 编号不被挤, 类目允许被压, y 中心对齐)
+  deviceTagRowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  // 底部值（位置）
-  deviceTagValueBottom: {
-    fontSize: 12,
-    color: '#666',
-    flexShrink: 1,
-    textAlign: 'left',
-    marginBottom: -4,
-  },
-  // 数量（右对齐）
-  deviceTagQuantity: {
-    fontSize: 12,
-    color: '#666',
-    flexShrink: 1,
-    textAlign: 'right',
-    marginBottom: -4,
-  },
+  // 器件名称: 比其他字段"大两号" (12 -> 18, 差 3 档)
   deviceTagName: {
     fontSize: 18,
     fontWeight: '600',
     color: '#1976d2',
-    textAlign: 'center',
-    numberOfLines: 1,
+    lineHeight: 22,
+  },
+  // 名称居中容器
+  deviceTagNameCenter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 2,
+  },
+  // 亮灯时名称高亮
+  deviceTagNameLit: {
+    color: '#0d47a1',
+  },
+  // 第三行: 位置 + 数量(flex 同行, 位置不被挤, 数量允许被压, y 中心对齐)
+  deviceTagRowBottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  // 数量(第三行右, 带 × 前缀, 短时靠右/长时右省略)
+  deviceTagQuantityCorner: {
+    marginLeft: 24,  // 2 字符宽度间距
   },
   addButton: {
-    backgroundColor: '#007AFF',
-    flex: 1,
-    marginRight: 8,
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
+    backgroundColor: '#1976d2',  // 跟扫码按钮颜色一致
+    // 不再覆盖 flex/padding/borderRadius/alignItems, 让 controlAllButton 决定布局
+    // → 4 个按钮完全等高 / 等宽 / 同圆角
   },
   addButtonText: {
     color: 'white',

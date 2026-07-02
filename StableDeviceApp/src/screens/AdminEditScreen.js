@@ -24,6 +24,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { getCategories } from '../services/DeviceCategoryService';
+import ImageUploadField from '../components/ImageUploadField';
 
 const AdminEditScreen = ({ navigation, route }) => {
   // 获取路由参数：device（编辑时的器件数据）、isNew（是否新增）、onSave（保存回调）
@@ -55,6 +56,7 @@ const AdminEditScreen = ({ navigation, route }) => {
     location: device?.location != null && device?.location !== '' ? String(device.location) : '',
     notes: device?.notes || '',
     shelfId: device?.shelfId ? device.shelfId.toString() : '1',
+    image: device?.image || '',  // 已存的图片 uri（编辑时回显）
     errors: {},
   };
 
@@ -147,6 +149,14 @@ const AdminEditScreen = ({ navigation, route }) => {
     setExpandedCategory(null);
   };
 
+  // 图片选择交给 ImageUploadField 组件处理, 这里只需 state 回调
+  const handleImageChange = useCallback(
+    (uri) => {
+      dispatch({ type: 'SET_FIELD', payload: { field: 'image', value: uri } });
+    },
+    []
+  );
+
   useFocusEffect(
     React.useCallback(() => {
       const loadAllDevices = async () => {
@@ -171,8 +181,10 @@ const AdminEditScreen = ({ navigation, route }) => {
 
   const getOccupiedPositions = () => {
     const occupied = new Map();
+    // 多库存: 用当前编辑器件的 shelfId (而不是写死 '1'), 避免位置冲突检查错乱
+    const editingShelfId = state.shelfId || '1';
     allDevices
-      .filter((d) => d.shelfId === '1' && d.location != null && d.location !== '' && d.id !== state.id)
+      .filter((d) => d.shelfId === editingShelfId && d.location != null && d.location !== '' && d.id !== state.id)
       .forEach((d) => {
         const pos = parseInt(d.location, 10);
         if (!isNaN(pos)) {
@@ -283,20 +295,34 @@ const AdminEditScreen = ({ navigation, route }) => {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>基本信息</Text>
 
-            {/* 1. 编号 */}
+            {/* 1. 编号 + 添加图片 (50:50) */}
             <View style={styles.formGroup}>
-              <Text style={styles.label}>编号</Text>
-              <TextInput
-                style={styles.input}
-                value={state.supplierId}
-                onChangeText={(text) =>
-                  dispatch({
-                    type: 'SET_FIELD',
-                    payload: { field: 'supplierId', value: text },
-                  })
-                }
-                placeholder="请输入编号"
-              />
+              <View style={styles.row}>
+                {/* 编号 - 50% */}
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>编号</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={state.supplierId}
+                    onChangeText={(text) =>
+                      dispatch({
+                        type: 'SET_FIELD',
+                        payload: { field: 'supplierId', value: text },
+                      })
+                    }
+                    placeholder="请输入编号"
+                  />
+                </View>
+                {/* 添加图片 - 50%, 高度比编号框稍长 */}
+                <View style={styles.halfWidth}>
+                  <ImageUploadField
+                    value={state.image}
+                    onChange={handleImageChange}
+                    label="图片"
+                    height={80}
+                  />
+                </View>
+              </View>
             </View>
 
             {/* 2. 名称 */}
@@ -716,6 +742,24 @@ const styles = StyleSheet.create({
   },
   inputError: {
     borderColor: '#ff3b30',
+  },
+  // 添加图片方框 (朋友圈风格: 浅灰底 + 灰色加号)
+  imageUploadBox: {
+    height: 80,  // 比 TextInput 稍高 (用户最初要求: 比编号输入框长一点)
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    borderStyle: 'dashed',  // 虚线边框, 更像上传框
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageUploadPlus: {
+    fontSize: 40,
+    fontWeight: '300',
+    color: '#999',
+    lineHeight: 40,
+    includeFontPadding: false,
   },
   textArea: {
     height: 80,

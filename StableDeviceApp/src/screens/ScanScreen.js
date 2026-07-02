@@ -5,6 +5,7 @@ import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
+import ShelfService from '../services/ShelfService';
 import { getCategories } from '../services/DeviceCategoryService';
 import { logError } from '../utils/ErrorHandler';
 import { findFirstEmptyPosition as findFirstEmptyPositionFromUtils, getOccupiedPositionMap } from '../utils/positionUtils';
@@ -278,18 +279,24 @@ const ScanScreen = ({ navigation, route }) => {
     })();
   }, []);
 
-  // 查找器件架1中第一个空位置（0-89）—— 包装共享工具
+  // 查找指定库存上第一个空位置(0-89) —— 包装共享工具
   const findFirstEmptyPosition = async () => {
-    const devices = await StorageService.getDevices();
-    return findFirstEmptyPositionFromUtils(devices, 90);
+    const [devices, shelfId] = await Promise.all([
+      StorageService.getDevices(),
+      ShelfService.getCurrentShelfId(),
+    ]);
+    return findFirstEmptyPositionFromUtils(devices, shelfId, 90);
   };
 
   /**
-   * 加载已占用的位置映射（用于位置选择器中标记已占用的格子）—— 使用共享工具
+   * 加载已占用的位置映射(按当前库存过滤)
    */
   const loadOccupiedPositions = async () => {
-    const devices = await StorageService.getDevices();
-    setOccupiedPositions(getOccupiedPositionMap(devices));
+    const [devices, shelfId] = await Promise.all([
+      StorageService.getDevices(),
+      ShelfService.getCurrentShelfId(),
+    ]);
+    setOccupiedPositions(getOccupiedPositionMap(devices, shelfId));
   };
 
   /**
@@ -475,6 +482,8 @@ const ScanScreen = ({ navigation, route }) => {
       // [CRAWLER_DISABLED] 不再保存需要爬虫才能补全的字段
       // 当前策略：只存 QR 码里直接读到的 名称/编号/数量 + 用户手动输入的"采购渠道"
       // 备注：原"品牌"字段保留为存储键名 brand，但语义改为"采购渠道"，由用户手动填写
+      // 多库存: 扫码上架归属当前选中库存
+      const currentShelfId = await ShelfService.getCurrentShelfId();
       const newDevice = {
         name: deviceName || '',
         supplierId: supplierId,
@@ -485,7 +494,7 @@ const ScanScreen = ({ navigation, route }) => {
         // value: valueStr,          // [CRAWLER_DISABLED] 隐藏
         // resistance, voltage, ...  // [CRAWLER_DISABLED] 隐藏
         position: '',
-        shelfId: '1',
+        shelfId: currentShelfId,
         location: String(emptyPosition),
         quantity: parseInt(quantity) || 1,
       };

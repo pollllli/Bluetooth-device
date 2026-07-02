@@ -16,7 +16,6 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  TextInput,
   Modal,
   KeyboardAvoidingView,
   Platform,
@@ -24,10 +23,12 @@ import {
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';  // 文件选择器
 import * as FileSystem from 'expo-file-system/legacy';   // 文件系统操作
-import * as Sharing from 'expo-sharing';                 // 分享功能
+import * as Sharing from 'expo-sharing';                 // 分享功能(单文件兼容保留)
 import * as Clipboard from 'expo-clipboard';             // 剪贴板（用于复制导出路径）
 import * as ExpoEasyFs from 'expo-easy-fs';              // 下载目录读写（Android 10+ 走 MediaStore）
 import StorageService from '../services/StorageService';
+import ShelfService from '../services/ShelfService';
+import { setPendingAutoConnect } from '../utils/pendingAutoConnect';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { useUser } from '../context/UserContext';
 
@@ -42,8 +43,9 @@ const ProfileScreen = ({ navigation, route }) => {
   });
 
   // 数据导出相关状态
-  const [exportFileName, setExportFileName] = useState(''); // 导出文件名
-  const [showExportModal, setShowExportModal] = useState(false); // 是否显示导出弹窗
+  const [showExportModal, setShowExportModal] = useState(false); // 是否显示导出多选库存弹窗
+  const [shelves, setShelves] = useState([]); // 所有库存
+  const [selectedShelfIds, setSelectedShelfIds] = useState(new Set()); // 已选的库存 id
   // 导出成功弹窗信息（null 表示不显示）
   const [exportSuccessInfo, setExportSuccessInfo] = useState(null);
   // 复制按钮反馈状态
@@ -71,13 +73,18 @@ const ProfileScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 打开数据导出弹窗
-   * 自动生成默认文件名（格式：器件数据_日期.json）
+   * 打开数据导出弹窗: 加载所有库存, 让用户多选
    */
-  const handleOpenExportModal = () => {
-    const defaultName = `器件数据_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.json`;
-    setExportFileName(defaultName);
-    setShowExportModal(true);
+  const handleOpenExportModal = async () => {
+    try {
+      const list = await ShelfService.getShelves();
+      setShelves(list);
+      // 默认空选: 用户需要自己勾选, 避免一打开就把全部库存选上误操作
+      setSelectedShelfIds(new Set());
+      setShowExportModal(true);
+    } catch (err) {
+      Alert.alert('错误', '加载库存列表失败');
+    }
   };
 
   /**
@@ -88,24 +95,105 @@ const ProfileScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 关闭导出弹窗并清空文件名
+   * 跳转到库存管理页面（增/删/改名）
    */
-  const handleCloseExportModal = () => {
-    setShowExportModal(false);
-    setExportFileName('');
+  const handleOpenShelfManager = () => {
+    navigation.navigate('ShelfManager');
   };
 
   /**
-   * 关闭操作面板：取消导出
-   * 清理文档目录的中间文件，避免无意义占用空间
+   * 关闭导出弹窗
+   */
+  const handleCloseExportModal = () => {
+    setShowExportModal(false);
+    setSelectedShelfIds(new Set());
+  };
+
+  /**
+   * 把 exportList 写到 documentDirectory 临时目录, 返回 [{documentPath, fileName}, ...]
+   * 注意: 不写到 Download, 分享完 / 关闭时统一清理
+   */
+  const writeTempExportFiles = async (exportList) => {
+    const tempFiles = [];
+    for (const item of exportList) {
+      const json = JSON.stringify(item.backup, null, 2);
+      const documentPath = `${FileSystem.documentDirectory}${item.fileName}`;
+      await FileSystem.writeAsStringAsync(documentPath, json);
+      tempFiles.push({ documentPath, fileName: item.fileName });
+    }
+    return tempFiles;
+  };
+
+  /**
+   * 清理临时文件 (幂等, 失败忽略)
+   */
+  const cleanupTempExportFiles = async (tempFiles) => {
+    for (const f of tempFiles) {
+      try {
+        await FileSystem.deleteAsync(f.documentPath, { idempotent: true });
+      } catch (e) { /* 忽略 */ }
+    }
+  };
+
+  /**
+   * 「分享」按钮
+   * 因为微信等大多数 App 不支持多文件接收, 分享只支持单文件:
+   * - 选 1 个库存: 分享这个
+   * - 选 0 个: 提示至少选一个
+   * - 选多个: 取"导出排序中较前的那一个"(即 shelves 数组中的第一个)
+   * 导出按钮仍然支持多文件, 把所有选中的 json 一次写到 Download/
+   */
+  const handleShareFromExportModal = async () => {
+    if (selectedShelfIds.size === 0) {
+      Alert.alert('提示', '请先勾选一个库存数据再分享');
+      return;
+    }
+
+    const selected = shelves.filter((s) => selectedShelfIds.has(s.id));
+    setShowExportModal(false);
+
+    let tempFiles = [];
+    try {
+      const exportList = await StorageService.exportShelves(selected);
+      tempFiles = await writeTempExportFiles(exportList);
+      if (tempFiles.length === 0) {
+        Alert.alert('错误', '没有可分享的文件');
+        return;
+      }
+
+      // 分享只支持单文件: 取导出列表中第一个(也就是 shelves 排序中最靠前的)
+      const f = tempFiles[0];
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('提示', '当前设备不支持分享功能');
+        return;
+      }
+      const ext = f.fileName.toLowerCase().split('.').pop() || '';
+      // 多选时(>1)直接静默取第一个, 不再二次确认(用户已知分享仅支持单文件)
+      await Sharing.shareAsync(f.documentPath, {
+        mimeType: ext === 'json' ? 'text/plain' : 'application/octet-stream',
+        dialogTitle: `分享 ${f.fileName}`,
+        UTI: ext === 'json' ? 'public.json' : undefined,
+      });
+    } catch (err) {
+      logError('分享失败', err, 'ProfileScreen.handleShareFromExportModal');
+      Alert.alert('错误', `分享失败: ${err.message || '请重试'}`);
+    } finally {
+      await cleanupTempExportFiles(tempFiles);
+    }
+  };
+
+  /**
+   * 关闭操作面板：清理所有中间文件
    */
   const handleCloseExportSuccess = async () => {
-    const path = exportSuccessInfo?.documentPath;
-    if (path) {
-      try {
-        await FileSystem.deleteAsync(path, { idempotent: true });
-      } catch (e) {
-        // 清理失败不影响关闭
+    const files = exportSuccessInfo?.files || [];
+    for (const f of files) {
+      if (f?.documentPath) {
+        try {
+          await FileSystem.deleteAsync(f.documentPath, { idempotent: true });
+        } catch (e) {
+          // 清理失败不影响关闭
+        }
       }
     }
     setExportSuccessInfo(null);
@@ -130,128 +218,54 @@ const ProfileScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 「分享」按钮：唤起系统分享面板
-   * 注意：不能在 shareAsync 之前清理文件，否则分享面板找不到文件
-   * 分享面板关闭后（无论是否真的分享了）再清理中间文件
-   */
-  const handleShareFromSuccess = async () => {
-    if (!exportSuccessInfo?.documentPath) return;
-    const { documentPath, fileName } = exportSuccessInfo;
-
-    // 根据文件扩展名自动选择正确的 MIME
-    // 微信好友分享限制：
-    //   ✅ 接受：image/*, video/*, pdf, doc(x), xls(x), ppt(x), txt
-    //   ❌ 拒绝：json（任何手机都会被拒，这是微信策略）
-    //
-    // ⚠️ 重要：json 不用 application/json，原因：
-    //   华为/鸿蒙对 Intent 中的 application/json MIME 有系统级白名单过滤，
-    //   即使 OPPO/Vivo/小米/三星 能正常分享 json，
-    //   华为手机会在系统层拦截，微信收不到文件 → 显示"暂不支持分享"。
-    //   改用 text/plain 后，所有 Android OEM 厂商都会放行。
-    const ext = fileName.toLowerCase().split('.').pop() || '';
-    const mimeMap = {
-      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      xls: 'application/vnd.ms-excel',
-      csv: 'text/csv',
-      txt: 'text/plain',
-      pdf: 'application/pdf',
-      // 关键：json 用 text/plain 而不是 application/json，绕过华为 MIME 拦截
-      json: 'text/plain',
-    };
-    const mimeType = mimeMap[ext] || 'application/octet-stream';
-
-    // 先关闭操作面板，再唤起分享面板（避免遮挡）
-    setExportSuccessInfo(null);
-    setPathCopied(false);
-    try {
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(documentPath, {
-          mimeType,
-          dialogTitle: `分享 ${fileName}`,
-          UTI: ext === 'json' ? 'public.json' : undefined,
-        });
-      } else {
-        Alert.alert('提示', '当前设备不支持分享功能');
-      }
-    } catch (err) {
-      logError('主动分享失败', err, 'ProfileScreen.handleShareFromSuccess');
-      Alert.alert('错误', `分享失败：${err.message || '请重试'}`);
-    } finally {
-      // 无论分享成功/失败/取消，都清理中间文件
-      try {
-        await FileSystem.deleteAsync(documentPath, { idempotent: true });
-      } catch (e) {
-        // 忽略
-      }
-    }
-  };
-
-  /**
-   * 执行数据导出操作
+   * 执行多库存数据导出
    *
-   * 流程：
-   * 1. 验证文件名不为空
-   * 2. 从存储服务导出所有数据（器件、BOM、分类等）
-   * 3. 将数据序列化为JSON格式
-   * 4. 先写入应用文档目录（用于分享功能，不删除）
-   * 5. 再复制到公共下载目录（expo-easy-fs 走 MediaStore 适配 Android 10+ scoped storage）
-   * 6. 弹出"导出成功"操作面板：展示默认下载路径+复制+分享+完成按钮
-   * 7. 不主动唤起系统分享面板——避免 expo-sharing 在 Android 上无法区分
-   *    "用户分享"与"切后台"导致误判为"导出成功"的体验问题
-   * 8. 文件已保存到下载目录，用户可随时通过面板里的「分享」按钮主动唤起分享
+   * 流程:
+   * 1. 校验至少选了 1 个库存
+   * 2. 用 exportShelves 一次性生成 N 份 JSON (各只含对应库存的器件)
+   * 3. 全部写入下载目录 (走 MediaStore 适配 Android 10+)
+   * 4. 弹成功弹窗, 用户点完成关闭 (分享入口已上移到上一级)
    */
   const handleExportData = async () => {
-    // 验证文件名
-    if (!exportFileName.trim()) {
-      Alert.alert('提示', '请输入文件名');
+    if (selectedShelfIds.size === 0) {
+      Alert.alert('提示', '请至少选择一个库存');
       return;
     }
+    const selected = shelves.filter((s) => selectedShelfIds.has(s.id));
+    setShowExportModal(false);
 
     try {
-      // 导出所有数据（包含器件、BOM、分类等）
-      const backupData = await StorageService.exportAllData();
-      // 序列化为格式化的JSON
-      const backupJson = JSON.stringify(backupData, null, 2);
+      // 1. 一次性生成 N 份 JSON 对象
+      const exportList = await StorageService.exportShelves(selected);
 
-      // 确保文件名以.json结尾
-      const fileName = exportFileName.endsWith('.json') ? exportFileName : `${exportFileName}.json`;
+      // 2. 写入下载目录 + 收集中间文件路径
+      const writtenFiles = [];
+      for (const item of exportList) {
+        const json = JSON.stringify(item.backup, null, 2);
+        const documentPath = `${FileSystem.documentDirectory}${item.fileName}`;
+        await FileSystem.writeAsStringAsync(documentPath, json);
+        try {
+          await ExpoEasyFs.copyFileToDownload(documentPath, item.fileName);
+        } catch (e) {
+          console.warn(`写入下载目录失败: ${item.fileName}`, e);
+        }
+        writtenFiles.push({
+          documentPath,
+          fileName: item.fileName,
+          deviceCount: item.backup?.summary?.deviceCount || 0,
+        });
+      }
 
-      // 写入应用文档目录作为中间文件（供「确认」/「分享」使用）
-      // 注意：此时还没写入下载目录，文件仅存在 app 内部
-      const documentPath = `${FileSystem.documentDirectory}${fileName}`;
-      await FileSystem.writeAsStringAsync(documentPath, backupJson);
-
-      // 关闭文件名输入弹窗
-      setShowExportModal(false);
-      setExportFileName('');
-
-      // 弹出"操作面板"，等待用户选择如何保存
-      // androidVisiblePath 显示"将要保存到"的默认下载路径
+      // 3. 弹操作面板
       setExportSuccessInfo({
-        fileName,
-        androidVisiblePath: `Download/${fileName}`,
-        documentPath,
+        files: writtenFiles,
+        androidVisiblePath: writtenFiles.length === 1
+          ? `Download/${writtenFiles[0].fileName}`
+          : `Download/ (共 ${writtenFiles.length} 个文件)`,
       });
     } catch (error) {
-      logError('准备导出数据失败', error, 'ProfileScreen.handleExportData');
-      Alert.alert('错误', `导出数据失败: ${error.message || '请重试'}`);
-    }
-  };
-
-  /**
-   * 「确认」按钮：写入到默认下载目录
-   * expo-easy-fs 的 copyFileToDownload 内部走 MediaStore，兼容 Android 10+ scoped storage
-   */
-  const handleConfirmExport = async () => {
-    if (!exportSuccessInfo?.documentPath) return;
-    const { documentPath, fileName } = exportSuccessInfo;
-    try {
-      await ExpoEasyFs.copyFileToDownload(documentPath, fileName);
-      Alert.alert('成功', `文件已保存到 Download/${fileName}`);
-      handleCloseExportSuccess();
-    } catch (err) {
-      logError('保存到下载目录失败', err, 'ProfileScreen.handleConfirmExport');
-      Alert.alert('错误', `保存到下载目录失败：${err.message || '请重试'}`);
+      logError('导出多库存数据失败', error, 'ProfileScreen.handleExportData');
+      Alert.alert('错误', `导出失败: ${error.message || '请重试'}`);
     }
   };
 
@@ -279,13 +293,57 @@ const ProfileScreen = ({ navigation, route }) => {
 
             await StorageService.importAllData(backupData);
 
-            Alert.alert('成功', '数据导入成功！\n\n应用将重启以加载新数据。', [
+            // 导入完成后清空库存缓存, 重新加载
+            ShelfService.clearShelvesCache();
+
+            // 关键: 导入完成后, 自动获取当前库存的蓝牙绑定,
+            // 让用户进入 app 后能"自动跳到连接页"并直接连上绑定的蓝牙,
+            // 不用再去手动点"未连接"按钮才能扫描
+            let autoConnectMac = null;
+            let autoConnectName = null;
+            try {
+              // 优先用 currentShelf 的绑定 (最准确)
+              const curShelfId = await ShelfService.getCurrentShelfId();
+              if (curShelfId) {
+                const allShelves = await ShelfService.getShelves();
+                const cur = allShelves.find((s) => s.id === curShelfId);
+                if (cur && cur.bluetoothMac) {
+                  autoConnectMac = cur.bluetoothMac;
+                  autoConnectName = cur.bluetoothName || null;
+                }
+              }
+              // 兜底: 拿不到 shelf 绑定就用 lastConnectedDevice
+              if (!autoConnectMac) {
+                const lcd = await StorageService.getLastConnectedDevice();
+                if (lcd && (lcd.deviceId || lcd.id)) {
+                  autoConnectMac = lcd.deviceId || lcd.id;
+                  autoConnectName = lcd.deviceName || lcd.name || null;
+                }
+              }
+              console.log('[handleImportData] 导入后自动连接目标:', autoConnectMac, autoConnectName);
+            } catch (acErr) {
+              console.warn('[handleImportData] 获取自动连接目标失败:', acErr);
+            }
+
+            Alert.alert('成功', '数据导入成功！\n\n应用将跳转到库存首页加载新数据。', [
               {
                 text: '确定',
                 onPress: async () => {
+                  // 关键: 导入完成后, 不管有没有绑定蓝牙, 都先跳到库存首页
+                  // 如果有绑定蓝牙, 通过 setPendingAutoConnect 标记"待自动连"
+                  // DeviceListScreen mount 时会消费这个标记, 自动跳到连接页
+                  if (autoConnectMac) {
+                    setPendingAutoConnect(autoConnectMac, autoConnectName);
+                  }
+                  // 跳到库存首页 (DeviceListTab 是 Tab.Navigator 的第一个 tab, 即默认 tab)
                   navigation.reset({
                     index: 0,
-                    routes: [{ name: 'MainTabs' }],
+                    routes: [
+                      {
+                        name: 'MainTabs',
+                        params: { screen: 'DeviceListTab' },
+                      },
+                    ],
                   });
                 },
               },
@@ -315,6 +373,11 @@ const ProfileScreen = ({ navigation, route }) => {
             <Text style={styles.menuArrow}>›</Text>
           </TouchableOpacity>
 
+          <TouchableOpacity style={styles.menuItem} onPress={handleOpenShelfManager}>
+            <Text style={styles.menuText}>库存管理</Text>
+            <Text style={styles.menuArrow}>›</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.menuItem} onPress={handleOpenExportModal}>
             <Text style={styles.menuText}>数据导出</Text>
             <Text style={styles.menuArrow}>›</Text>
@@ -335,7 +398,7 @@ const ProfileScreen = ({ navigation, route }) => {
         </View>
       </ScrollView>
 
-      {/* 数据导出文件名输入弹窗 */}
+      {/* 数据导出: 多选库存弹窗 */}
       <Modal
         visible={showExportModal}
         animationType="slide"
@@ -347,33 +410,65 @@ const ProfileScreen = ({ navigation, route }) => {
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>数据导出</Text>
+            {/* 右上角 × 关闭按钮 (取代原来的"取消"按钮) */}
+            <TouchableOpacity
+              style={styles.modalCloseButton}
+              onPress={handleCloseExportModal}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Text style={styles.modalCloseButtonText}>×</Text>
+            </TouchableOpacity>
 
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>文件名</Text>
-              <TextInput
-                style={styles.fileNameInput}
-                value={exportFileName}
-                onChangeText={setExportFileName}
-                placeholder="请输入文件名"
-                autoFocus={true}
-              />
-              <Text style={styles.fileNameHint}>默认命名格式：器件数据_日期</Text>
-              <Text style={styles.fileNameHint}>点击导出后可选择保存位置</Text>
+            <Text style={styles.modalTitle}>数据导出 - 选择库存</Text>
+            <Text style={styles.fileNameHint}>
+              勾选要导出的库存，分享仅支持单个文件分享
+            </Text>
+
+            {/* 库存多选列表 */}
+            <View style={styles.shelfListBox}>
+              {shelves.map((shelf) => {
+                const checked = selectedShelfIds.has(shelf.id);
+                return (
+                  <TouchableOpacity
+                    key={shelf.id}
+                    style={styles.shelfRow}
+                    onPress={() => {
+                      const next = new Set(selectedShelfIds);
+                      if (checked) {
+                        next.delete(shelf.id);
+                      } else {
+                        next.add(shelf.id);
+                      }
+                      setSelectedShelfIds(next);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={[styles.shelfCheckbox, checked && styles.shelfCheckboxChecked]}
+                    >
+                      {checked && <Text style={styles.shelfCheckboxTick}>✓</Text>}
+                    </View>
+                    <Text style={styles.shelfRowName}>{shelf.name}</Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
 
+            {/* 底部按钮: 分享 / 导出 (取代原来的 取消 / 导出) */}
             <View style={styles.modalButtons}>
               <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={handleCloseExportModal}
+                style={[styles.modalButton, styles.shareButton]}
+                onPress={handleShareFromExportModal}
               >
-                <Text style={styles.cancelButtonText}>取消</Text>
+                <Text style={styles.shareButtonText}>分享</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.modalButton, styles.submitButton]}
                 onPress={handleExportData}
               >
-                <Text style={styles.submitButtonText}>导出</Text>
+                <Text style={styles.submitButtonText}>
+                  导出 ({selectedShelfIds.size})
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -389,46 +484,29 @@ const ProfileScreen = ({ navigation, route }) => {
       >
         <View style={styles.successOverlay}>
           <View style={styles.successContent}>
-            {/* 文件保存路径 + 复制按钮 */}
-            <View style={styles.pathBox}>
-              <Text style={styles.infoLabel}>文件保存路径</Text>
-              <View style={styles.pathRow}>
-                <Text
-                  style={styles.pathValue}
-                  numberOfLines={2}
-                  ellipsizeMode="middle"
-                >
-                  {exportSuccessInfo?.androidVisiblePath}
+            {/* 文件列表 */}
+            {exportSuccessInfo?.files?.length > 0 && (
+              <View style={styles.fileListBox}>
+                <Text style={styles.infoLabel}>
+                  导出成功 ({exportSuccessInfo.files.length} 个文件)
                 </Text>
-                <TouchableOpacity
-                  style={[
-                    styles.copyButton,
-                    pathCopied && styles.copyButtonDone,
-                  ]}
-                  onPress={handleCopyExportPath}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.copyButtonText}>
-                    {pathCopied ? '已复制' : '复制'}
+                {exportSuccessInfo.files.map((f) => (
+                  <Text key={f.fileName} style={styles.fileListItem} numberOfLines={1}>
+                    • {f.fileName} ({f.deviceCount} 个器件)
                   </Text>
-                </TouchableOpacity>
+                ))}
+                <Text style={styles.fileListHint}>已保存到 Download/ 目录</Text>
               </View>
-            </View>
+            )}
 
+            {/* 只保留"完成"按钮: 分享入口已上移到上一级, 不再在导出后再分享 */}
             <View style={styles.successButtonRow}>
               <TouchableOpacity
-                style={[styles.successActionButton, styles.shareButton]}
-                onPress={handleShareFromSuccess}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.shareButtonText}>分享</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
                 style={[styles.successActionButton, styles.successOkButton]}
-                onPress={handleConfirmExport}
+                onPress={handleCloseExportSuccess}
                 activeOpacity={0.7}
               >
-                <Text style={styles.successOkButtonText}>确认</Text>
+                <Text style={styles.successOkButtonText}>完成</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -524,6 +602,23 @@ const styles = StyleSheet.create({
     width: '85%',
     maxWidth: 400,
   },
+  // 导出弹窗右上角 × 关闭按钮
+  modalCloseButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  modalCloseButtonText: {
+    fontSize: 28,
+    color: '#999',
+    fontWeight: '300',
+    lineHeight: 30,
+  },
   modalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
@@ -580,6 +675,60 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#999',
     marginTop: 8,
+    marginBottom: 4,
+  },
+  shelfListBox: {
+    marginVertical: 12,
+    maxHeight: 300,
+  },
+  shelfRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  shelfCheckbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#ccc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  shelfCheckboxChecked: {
+    backgroundColor: '#1976d2',
+    borderColor: '#1976d2',
+  },
+  shelfCheckboxTick: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  shelfRowName: {
+    fontSize: 15,
+    color: '#333',
+    flex: 1,
+  },
+  fileListBox: {
+    backgroundColor: '#e8f5e9',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  fileListItem: {
+    fontSize: 13,
+    color: '#333',
+    marginTop: 4,
+  },
+  fileListHint: {
+    fontSize: 11,
+    color: '#666',
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   // ===== 导出成功弹窗样式 =====
   successOverlay: {

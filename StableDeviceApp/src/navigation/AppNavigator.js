@@ -12,6 +12,7 @@ import ProfileScreen from '../screens/ProfileScreen';
 import ConnectionScreen from '../screens/ConnectionScreen';
 import ScanScreen from '../screens/ScanScreen';
 import CategoryManagementScreen from '../screens/CategoryManagementScreen';
+import ShelfManagerScreen from '../screens/ShelfManagerScreen';
 import { useUser } from '../context/UserContext';
 
 const Stack = createStackNavigator();
@@ -241,6 +242,14 @@ const AppNavigator = () => {
           component={CategoryManagementScreen}
           options={{
             title: '分类管理',
+            headerBackTitle: '返回',
+          }}
+        />
+        <Stack.Screen
+          name="ShelfManager"
+          component={ShelfManagerScreen}
+          options={{
+            title: '库存管理',
             headerBackTitle: '返回',
           }}
         />

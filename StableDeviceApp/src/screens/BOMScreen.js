@@ -22,6 +22,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as XLSX from 'xlsx';
 import StorageService from '../services/StorageService';
+import ShelfService from '../services/ShelfService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import * as pendingBomImport from '../utils/pendingBomImport';
 import { usePendingBomImport } from '../utils/pendingBomImport';
@@ -56,6 +57,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   const [pendingComponent, setPendingComponent] = useState(null);     // 等待上架的组件（暂存）
   const [expandedBank, setExpandedBank] = useState(null);      // 当前展开的排号（位置选择器中）
   const currentLitPosition = useRef(null);                     // 当前亮灯的物理位置（用于位置选择器预览）
+  const [currentShelfId, setCurrentShelfId] = useState('1');   // 当前选中库存 id (跟随 ShelfService)
   const previewTimeout = useRef(null);                         // 预览灯自动熄灭定时器
   const isOperatingRef = useRef(false);                        // 操作锁，防止重复点击
 
@@ -100,6 +102,12 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   useFocusEffect(
     React.useCallback(() => {
       loadDevices();
+      // 同步当前选中库存 (从设置页/库存页切库后保持一致)
+      ShelfService.getCurrentShelfId()
+        .then((id) => {
+          if (id) setCurrentShelfId(id);
+        })
+        .catch((e) => console.warn('[BOM] 读取当前库存失败:', e));
       return () => {
         turnOffCurrentLight();
       };
@@ -557,7 +565,12 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
       );
     };
 
+    // 修复: BOM 匹配只看当前选中库存的器件, 而不是全部器件 (写死 '1' 的 bug)
     const matchedDevices = devices.filter((device, index) => {
+      // 跳过非当前库存的器件
+      if (device.shelfId !== currentShelfId) {
+        return false;
+      }
       console.log(`\n检查器件[${index}]: ${device.name}`);
       console.log(`  器件供应商编号: ${device.supplierId}`);
       console.log(`  器件封装: ${device.package}`);
@@ -733,8 +746,9 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
    */
   const getOccupiedPositions = () => {
     const occupied = new Map();
+    // 用当前选中库存的 id 过滤, 而不是写死 '1'
     devices
-      .filter((d) => d.shelfId === '1' && d.location != null && d.location !== '')
+      .filter((d) => d.shelfId === currentShelfId && d.location != null && d.location !== '')
       .forEach((d) => {
         const pos = parseInt(d.location, 10);
         if (!isNaN(pos)) {
@@ -800,7 +814,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
         current: pendingComponent.current || '',
         power: pendingComponent.power || '',
         frequency: pendingComponent.frequency || '',
-        shelfId: '1',
+        shelfId: currentShelfId, // 修复: 上架到当前选中库存, 而不是写死 '1'
         location: String(position),
       };
 

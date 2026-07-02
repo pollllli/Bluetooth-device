@@ -1,160 +1,185 @@
+import React, { useRef, useState, useCallback } from 'react';
+import { View, Text, Animated, TouchableOpacity, StyleSheet } from 'react-native';
+import { PanGestureHandler, State } from 'react-native-gesture-handler';
+
 /**
- * SwipeableRow - 微信风格左滑显示器件名+操作按钮
+ * SwipeableRow - 左滑操作行
  *
- * 效果(图2):
- * ╭────────────┬──────┬─────╮
- * │ 器件名称xxx│ 删除 │ 编辑 │   ← 左滑后从右侧露出
- * ╰────────────┴──────┴─────╯
- *      60%        20%   20%
+ * 状态模型 (单值, 简化版):
+ *   translateX.value = 当前视觉位置 (Animated.Value, 既是手势输出也是 spring 输出)
+ *   lastOffsetRef.current = 上次静止位置 (仅在 spring 完成时被赋值)
  *
- * 圆角策略:
- * - 左半边 (nameBox) 用 borderTopLeftRadius + borderBottomLeftRadius
- * - 右半边 (editButton) 用 borderTopRightRadius + borderBottomRightRadius
- * - 中间 (deleteButton) 不需要圆角
- * - 圆角值透传自 tagStyle.borderRadius (与原始 deviceTag 保持一致)
- *   这样左滑/右滑过程中不会从圆角突变为方角
+ * 手势中:  onGestureEvent 把 (tx + lastOffset) 钳到 [-160, 0] 直接 setValue
+ * 手势 END: animateTo 用 spring 推动 translateX 到 target, 完成时 lastOffset = target
+ * 新手势 BEGAN: stopAnimation 的 callback 把当前 value 写回 lastOffset
+ *             (关键! 防止 spring 被新手势打断时 lastOffset 是 stale 的, 导致视觉跳变)
  *
- * 实现要点:
- * - position: absolute + 固定 width (不用 flex)
- * - 用 onLayout 拿 row 实际宽度, 实时计算各区块 width
- *
- * 基于 react-native-gesture-handler/Swipeable
+ * 配套: 上层 FlatList 必须用 react-native-gesture-handler 的 FlatList
+ * (否则 Android native scroll view 会吞掉所有触摸, PanGestureHandler 收不到 pan).
  */
-import React, { useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import Swipeable from 'react-native-gesture-handler/Swipeable';
 
-const NAME_RATIO = 0.6;
-const BTN_RATIO = 0.2;
-const DEFAULT_BORDER_RADIUS = 12;
+const ACTION_BUTTON_WIDTH = 80;
+const ACTIONS_TOTAL_WIDTH = ACTION_BUTTON_WIDTH * 2;
+const SWIPE_THRESHOLD = ACTIONS_TOTAL_WIDTH / 2;
+const VELOCITY_THRESHOLD = 800;
 
-const SwipeableRow = ({ children, deviceName, tagStyle, onEdit, onDelete }) => {
-  const swipeableRef = useRef(null);
-  const [rowWidth, setRowWidth] = useState(0);
+const SwipeableRow = ({ children, onEdit, onDelete }) => {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const lastOffsetRef = useRef(0);
+  const [isOpen, setIsOpen] = useState(false);
 
-  const handleEdit = () => {
-    swipeableRef.current?.close();
-    if (onEdit) onEdit();
-  };
-
-  const handleDelete = () => {
-    swipeableRef.current?.close();
-    if (onDelete) onDelete();
-  };
-
-  const nameWidth = rowWidth * NAME_RATIO;
-  const btnWidth = rowWidth * BTN_RATIO;
-  // 透传 deviceTag 的圆角值, 保证左滑/右滑过程中圆角一致
-  const borderRadius = tagStyle?.borderRadius ?? DEFAULT_BORDER_RADIUS;
-
-  // 用 absolute + 固定 width (避免 flex + native animation 引起的空白问题)
-  const renderRightActions = () => (
-    <View style={styles.actionsContainer}>
-      {/* 器件名标签 - 左 60%, 仅左半边圆角 */}
-      <View
-        style={[
-          styles.nameBox,
-          {
-            width: nameWidth,
-            left: 0,
-            borderTopLeftRadius: borderRadius,
-            borderBottomLeftRadius: borderRadius,
-          },
-        ]}
-        pointerEvents="none"
-      >
-        <Text style={styles.nameText} numberOfLines={1}>
-          {deviceName || '未命名器件'}
-        </Text>
-      </View>
-
-      {/* 删除按钮 - 中 20%, 不用圆角 (中间) */}
-      <TouchableOpacity
-        style={[
-          styles.actionButton,
-          styles.deleteButton,
-          { width: btnWidth, right: btnWidth },
-        ]}
-        onPress={handleDelete}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.actionText}>删除</Text>
-      </TouchableOpacity>
-
-      {/* 编辑按钮 - 右 20%, 仅右半边圆角 */}
-      <TouchableOpacity
-        style={[
-          styles.actionButton,
-          styles.editButton,
-          {
-            width: btnWidth,
-            right: 0,
-            borderTopRightRadius: borderRadius,
-            borderBottomRightRadius: borderRadius,
-          },
-        ]}
-        onPress={handleEdit}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.actionText}>编辑</Text>
-      </TouchableOpacity>
-    </View>
+  // 手势进行中: JS 回调里计算钳制后的视觉位置, 再 setValue
+  // (不能用 Animated.event + useNativeDriver, 因为没法钳制; spring 阶段仍然 useNativeDriver)
+  const onGestureEvent = useCallback(
+    (event) => {
+      const tx = event.nativeEvent.translationX;
+      const effective = tx + lastOffsetRef.current;
+      // 钳制: 视觉位置 ∈ [-ACTIONS_TOTAL_WIDTH, 0]
+      const clamped = Math.min(0, Math.max(-ACTIONS_TOTAL_WIDTH, effective));
+      translateX.setValue(clamped);
+    },
+    [translateX]
   );
 
+  const animateTo = useCallback(
+    (targetOffset, velocity = 0) => {
+      const clampedTarget = Math.min(0, Math.max(-ACTIONS_TOTAL_WIDTH, targetOffset));
+      const isOpening = clampedTarget === -ACTIONS_TOTAL_WIDTH;
+
+      Animated.spring(translateX, {
+        toValue: clampedTarget,
+        useNativeDriver: true,
+        velocity,
+        bounciness: 0,                 // 临界阻尼, 不允许过冲
+        speed: isOpening ? 14 : 9,     // 打开快 (飞过去), 关闭慢 (能看清收回)
+      }).start(({ finished }) => {
+        // 只有正常完成才更新 lastOffset. 被中断 (finished=false) 时不去碰它,
+        // 因为 BEGAN 里的 stopAnimation callback 会负责同步.
+        if (finished) {
+          lastOffsetRef.current = clampedTarget;
+        }
+      });
+    },
+    [translateX]
+  );
+
+  const onHandlerStateChange = useCallback(
+    (event) => {
+      const { state, translationX: tx, velocityX } = event.nativeEvent;
+
+      if (state === State.END) {
+        const finalX = tx + lastOffsetRef.current;
+        const shouldOpen =
+          (finalX < -SWIPE_THRESHOLD && velocityX <= VELOCITY_THRESHOLD) ||
+          velocityX < -VELOCITY_THRESHOLD;
+        const target = shouldOpen ? -ACTIONS_TOTAL_WIDTH : 0;
+        setIsOpen(shouldOpen);
+        // 关闭时 velocity 强制 0 (正速度会让弹簧继续向右推造成过冲)
+        // 打开时保留 velocityX (快速左滑有"飞过去"的惯性)
+        const animVelocity = shouldOpen ? velocityX : 0;
+        animateTo(target, animVelocity);
+      } else if (state === State.CANCELLED || state === State.FAILED) {
+        animateTo(lastOffsetRef.current, 0);
+      } else if (state === State.BEGAN) {
+        // 关键修复:
+        //   上一手势的 spring 可能还在跑 (例如用户没等动画结束就再次触屏).
+        //   如果不把当前 value 写回 lastOffsetRef, 后续 onGestureEvent 算 effective
+        //   时用的是 stale 的 lastOffset, 视觉位置会瞬间跳到错误值.
+        //
+        //   单一值模型下, translateX.value 就是当前视觉位置, 直接存就行.
+        //   - 如果 spring 在跑: callback 拿到的是被打断时的 value
+        //   - 如果 spring 没跑: callback 拿到的是当前静态 value (写回不改变语义)
+        translateX.stopAnimation((value) => {
+          lastOffsetRef.current = value;
+        });
+      }
+    },
+    [animateTo, translateX]
+  );
+
+  const close = useCallback(() => {
+    setIsOpen(false);
+    animateTo(0, 0);
+  }, [animateTo]);
+
+  const handleEdit = useCallback(() => {
+    close();
+    if (onEdit) onEdit();
+  }, [close, onEdit]);
+
+  const handleDelete = useCallback(() => {
+    close();
+    if (onDelete) onDelete();
+  }, [close, onDelete]);
+
   return (
-    <View
-      onLayout={(e) => setRowWidth(e.nativeEvent.layout.width)}
-    >
-      <Swipeable
-        ref={swipeableRef}
-        renderRightActions={renderRightActions}
-        friction={1}              // 不减速, 拖多少走多少
-        rightThreshold={20}       // 滑过 20px 就判定为打开
-        overshootRight={false}    // 不允许过冲
+    <View style={styles.container}>
+      <View
+        style={styles.actionsContainer}
+        pointerEvents={isOpen ? 'auto' : 'box-none'}
       >
-        {children}
-      </Swipeable>
+        <TouchableOpacity
+          style={[styles.actionButton, styles.editButton]}
+          onPress={handleEdit}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.actionText}>编辑</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.actionButton, styles.deleteButton]}
+          onPress={handleDelete}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.actionText}>删除</Text>
+        </TouchableOpacity>
+      </View>
+
+      <PanGestureHandler
+        onGestureEvent={onGestureEvent}
+        onHandlerStateChange={onHandlerStateChange}
+        activeOffsetX={[-10, 10]}
+      >
+        <Animated.View
+          style={[styles.row, { transform: [{ translateX }] }]}
+        >
+          {children}
+        </Animated.View>
+      </PanGestureHandler>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
+  container: {
+    position: 'relative',
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
+  },
   actionsContainer: {
-    flex: 1,
-  },
-  // 器件名标签 - absolute 定位, 仅左半边圆角
-  nameBox: {
     position: 'absolute',
+    right: 0,
     top: 0,
     bottom: 0,
-    backgroundColor: 'white',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 12,
+    flexDirection: 'row',
   },
-  nameText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1976d2',
-  },
-  // 操作按钮 - absolute 定位
   actionButton: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
+    width: ACTION_BUTTON_WIDTH,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  deleteButton: {
-    backgroundColor: '#ff3b30',
   },
   editButton: {
     backgroundColor: '#1976d2',
   },
+  deleteButton: {
+    backgroundColor: '#ff3b30',
+  },
   actionText: {
-    color: 'white',
+    color: '#ffffff',
     fontSize: 15,
     fontWeight: '600',
+  },
+  row: {
+    backgroundColor: '#ffffff',
   },
 });
 

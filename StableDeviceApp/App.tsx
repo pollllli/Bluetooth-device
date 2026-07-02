@@ -12,6 +12,7 @@ import {
   StatusBar,
   Platform,
   NativeModules,
+  PermissionsAndroid,
   ScrollView,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -25,6 +26,7 @@ import ErrorBoundary from './src/components/ErrorBoundary';
 import StorageService from './src/services/StorageService';
 import { logError } from './src/utils/ErrorHandler';
 import * as pendingBomImport from './src/utils/pendingBomImport';
+import { setPendingAutoConnect } from './src/utils/pendingAutoConnect';
 
 const FETCH_TIMEOUT_MS = 30000;
 
@@ -290,6 +292,94 @@ export default function App() {
     };
   }, []);
 
+  // ============ 启动时一次性请求所有危险权限 ============
+  // 关键: 解决"导入后自动连蓝牙失败"问题
+  // 之前只有用户点"扫描蓝牙设备"按钮才会触发权限弹窗, 导入后自动跳到连接页时
+  // 权限还没授予, connectToBluetoothDevice() 直接被系统拒绝 → "自动连接失败"
+  // 修法: 启动时就把 蓝牙/相机/存储 全部请求一遍
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+
+    (async () => {
+      try {
+        // 已记录过"已询问过"标识, 避免每次冷启动都弹窗骚扰用户
+        const askedFlag = await AsyncStorage.getItem('@permissionsAsked');
+        const isFirstAsk = !askedFlag;
+
+        // Android 12+ 蓝牙危险权限
+        const newBtPerms: string[] = [];
+        if ((PermissionsAndroid.PERMISSIONS as any).BLUETOOTH_SCAN) {
+          newBtPerms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
+        }
+        if ((PermissionsAndroid.PERMISSIONS as any).BLUETOOTH_CONNECT) {
+          newBtPerms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+        }
+
+        // 经典蓝牙 (Android 11 及以下)
+        const legacyBtPerms: string[] = [];
+        if ((PermissionsAndroid.PERMISSIONS as any).BLUETOOTH) {
+          legacyBtPerms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH);
+        }
+        if ((PermissionsAndroid.PERMISSIONS as any).BLUETOOTH_ADMIN) {
+          legacyBtPerms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADMIN);
+        }
+
+        // 位置权限 (蓝牙扫描依赖, 兼容 Android 6-11)
+        const locationPerm = PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION;
+
+        // 相机 (扫码上架)
+        let cameraPerm: string | null = null;
+        if ((PermissionsAndroid.PERMISSIONS as any).CAMERA) {
+          cameraPerm = PermissionsAndroid.PERMISSIONS.CAMERA;
+        }
+
+        // 存储 (Android 9 及以下写 Download 需要, Android 10+ 已用 MediaStore 走 scoped storage)
+        let storagePerm: string | null = null;
+        if ((PermissionsAndroid.PERMISSIONS as any).WRITE_EXTERNAL_STORAGE) {
+          storagePerm = PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
+        }
+
+        const allPerms: any[] = [
+          ...newBtPerms,
+          ...legacyBtPerms,
+          locationPerm,
+        ];
+        if (cameraPerm) allPerms.push(cameraPerm);
+        if (storagePerm) allPerms.push(storagePerm);
+
+        console.log('[App] 启动请求权限:', allPerms);
+
+        // requestMultiple 比逐个 request 更友好 (只弹一次系统弹窗)
+        const results = await PermissionsAndroid.requestMultiple(allPerms);
+        console.log('[App] 权限请求结果:', results);
+
+        // 标记已询问 (不管用户是否同意都标记, 避免反复弹窗)
+        await AsyncStorage.setItem('@permissionsAsked', '1');
+
+        // 关键权限 (蓝牙+位置) 未授权时给用户一个非阻断性提示
+        const bluetoothGranted =
+          (results[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN] ?? 'granted') === 'granted' ||
+          // 旧版无 BLUETOOTH_SCAN 字段时跳过
+          !newBtPerms.includes(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
+        const locationGranted =
+          (results[locationPerm] ?? 'granted') === 'granted';
+
+        if (isFirstAsk && (!bluetoothGranted || !locationGranted)) {
+          // 首次询问 + 关键权限被拒, 弹一个解释 (不阻塞)
+          setTimeout(() => {
+            Alert.alert(
+              '权限提示',
+              '蓝牙和位置权限被拒绝, 部分功能 (扫描/连接蓝牙设备) 将不可用。\n\n如需使用, 请到系统"设置 → 应用 → StableDeviceApp → 权限"中手动开启。',
+              [{ text: '知道了' }]
+            );
+          }, 1500);
+        }
+      } catch (err) {
+        console.warn('[App] 启动权限请求失败:', err);
+      }
+    })();
+  }, []);
+
   /**
    * 读取外部 URI 指向的文件内容
    * 微信等应用通过 FileProvider 传入的 content:// URI 走新 API（ContentResolver.openInputStream）
@@ -331,7 +421,35 @@ export default function App() {
     try {
       const fileContent = await readImportFile(pendingImportUri);
       const backupData = JSON.parse(fileContent);
-      await StorageService.importAllData(backupData);
+      const result = await StorageService.importAllData(backupData);
+
+      // 关键: 拿到 currentShelf 绑定的蓝牙, 设为待自动连
+      // DeviceListScreen 获得焦点时会消费这个, 自动跳到连接页
+      try {
+        const data = backupData?.data || {};
+        let mac = null;
+        let name = null;
+        // 1) 优先用 currentShelf 的绑定
+        if (Array.isArray(data.shelves) && data.currentShelfId) {
+          const cur = data.shelves.find((s: any) => s && s.id === data.currentShelfId);
+          if (cur && cur.bluetoothMac) {
+            mac = cur.bluetoothMac;
+            name = cur.bluetoothName || null;
+          }
+        }
+        // 2) 兜底用 lastConnectedDevice
+        if (!mac && data.lastConnectedDevice) {
+          const lcd = data.lastConnectedDevice;
+          mac = lcd.deviceId || lcd.id || null;
+          name = lcd.deviceName || lcd.name || null;
+        }
+        if (mac) {
+          setPendingAutoConnect(mac, name);
+          console.log('[App.handleConfirmImport] 标记待自动连:', mac, name);
+        }
+      } catch (acErr) {
+        console.warn('[App.handleConfirmImport] 获取自动连目标失败:', acErr);
+      }
 
       // 关闭弹窗并清理状态
       const importedName = pendingImportName;
@@ -341,7 +459,7 @@ export default function App() {
 
       Alert.alert(
         '导入成功',
-        `文件 "${importedName}" 已成功导入！\n\n应用将自动跳转到主页加载新数据。`,
+        `文件 "${importedName}" 已成功导入！\n\n应用将跳转到库存首页加载新数据。`,
         [
           {
             text: '确定',
@@ -349,7 +467,12 @@ export default function App() {
               if (navigationRef.isReady()) {
                 navigationRef.reset({
                   index: 0,
-                  routes: [{ name: 'MainTabs' }],
+                  routes: [
+                    {
+                      name: 'MainTabs',
+                      params: { screen: 'DeviceListTab' },
+                    },
+                  ],
                 });
               }
             },

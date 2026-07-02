@@ -213,12 +213,12 @@ class BluetoothHandler {
 
             // 过滤条件（用户需求）：
             //   1) 必须有名称
-            //   2) RSSI 必须 >= -90dBm（包含较远但仍可用的设备）
+            //   2) RSSI 必须 > -80dBm（只保留信号较强的设备，过滤掉弱信号设备）
             //   3) 未重复的设备
             if (
               device.name &&
               typeof device.rssi === 'number' &&
-              device.rssi >= -90 &&
+              device.rssi > -80 &&
               !devices.some((d) => d.id === device.id)
             ) {
               devices.push({
@@ -227,9 +227,9 @@ class BluetoothHandler {
                 rssi: device.rssi,
               });
               console.log('发现设备:', device.name, device.id, device.rssi, 'dBm');
-            } else if (device.name && typeof device.rssi === 'number' && device.rssi < -90) {
-              // 调试日志：记录被过滤的极弱信号设备
-              console.log('过滤极弱信号设备:', device.name, device.id, device.rssi, 'dBm（< -90）');
+            } else if (device.name && typeof device.rssi === 'number' && device.rssi <= -80) {
+              // 调试日志：记录被过滤的弱信号设备
+              console.log('过滤弱信号设备:', device.name, device.id, device.rssi, 'dBm（<= -80）');
             }
           }
         );
@@ -882,7 +882,14 @@ class BluetoothHandler {
         this.readCharacteristicUUID,
         (error, characteristicData) => {
           if (error) {
-            console.error('notify订阅错误:', error);
+            // 静默处理设备断开时的 notify 错误, 避免 RN LogBox 弹"上次运行出错"
+            // 设备物理断开是正常状态, 错误会通过 onDisconnected 单独处理
+            const msg = (error && error.message) || String(error);
+            if (msg.includes('disconnected') || msg.includes('Disconnect')) {
+              console.log('设备已断开, notify 回调终止 (静默)');
+            } else {
+              console.warn('notify 回调异常:', msg);
+            }
             return;
           }
           console.log('收到notify数据:', characteristicData);
@@ -1446,6 +1453,21 @@ class BluetoothHandler {
       if (global.deviceConnection && global.deviceConnection.handler === this) {
         delete global.deviceConnection;
       }
+    }
+  }
+
+  /**
+   * 获取当前已连接设备的 MAC 地址
+   * @returns {string|null} MAC 地址(AA:BB:CC:DD:EE:FF 格式), 未连接返回 null
+   */
+  getCurrentMac() {
+    try {
+      if (!this.connectedDevice) return null;
+      // ble-plx 中 id 字段就是 MAC
+      return this.connectedDevice.id || null;
+    } catch (err) {
+      console.error('获取当前 MAC 失败:', err);
+      return null;
     }
   }
 

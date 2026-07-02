@@ -8,7 +8,8 @@
  * - 显示设备信号强度（RSSI）
  * - 设备连接状态实时监测
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -23,6 +24,7 @@ import {
 } from 'react-native';
 import BluetoothHandler from '../services/BluetoothHandler';
 import StorageService from '../services/StorageService';
+import ShelfService from '../services/ShelfService';
 
 /**
  * 按信号强度（RSSI）降序排序设备列表
@@ -43,7 +45,7 @@ function sortDevicesByRssi(devices) {
   });
 }
 
-const ConnectionScreen = ({ navigation }) => {
+const ConnectionScreen = ({ navigation, route }) => {
   // 蓝牙扫描相关状态
   const [isScanning, setIsScanning] = useState(false);           // 是否正在扫描设备
   const [availableDevices, setAvailableDevices] = useState([]);   // 扫描到的可用设备列表
@@ -121,6 +123,88 @@ const ConnectionScreen = ({ navigation }) => {
     };
   }, []);
 
+  // ========== 切库后: 自动连 / 自动扫 ==========
+  useFocusEffect(
+    useCallback(() => {
+      const params = route?.params;
+      const action = params?.action;
+      console.log('[ConnectionScreen] focus, params=', JSON.stringify(params));
+
+      if (action !== 'switchShelf') return;
+
+      // 清除路由参数, 避免下次重新进入再次触发
+      navigation.setParams({
+        action: undefined,
+        targetShelfId: undefined,
+        autoScan: undefined,
+        autoScanAt: undefined,
+        autoConnectMac: undefined,
+        autoConnectName: undefined,
+      });
+
+      // 路径 A: 切库到已绑定的蓝牙, 直接连接
+      const autoMac = params?.autoConnectMac;
+      if (autoMac) {
+        const tryAutoConnect = async (attempt = 0) => {
+          if (typeof connectToBluetoothDevice === 'function' && bluetoothHandler) {
+            console.log('[ConnectionScreen] 自动连接 MAC=', autoMac, 'attempt=', attempt);
+            try {
+              // 关键: 自动连前先确保权限已授予 (App.tsx 启动时已请求过, 这里再补一道兜底)
+              // 否则 Android 12+ 会因为没授权直接拒绝连接 → 弹"自动连接失败"
+              try {
+                if (typeof requestBluetoothPermissions === 'function') {
+                  const hasPerm = await requestBluetoothPermissions();
+                  if (!hasPerm) {
+                    console.warn('[ConnectionScreen] 自动连接: 权限未授予, 降级到扫描');
+                    if (typeof scanForBluetoothDevices === 'function') {
+                      scanForBluetoothDevices();
+                    }
+                    return;
+                  }
+                }
+              } catch (permErr) {
+                console.warn('[ConnectionScreen] 自动连接: 请求权限异常, 继续尝试连接', permErr);
+              }
+              await connectToBluetoothDevice(autoMac);
+            } catch (err) {
+              console.warn('[ConnectionScreen] 自动连接失败:', err);
+              // 失败降级到扫描
+              if (typeof scanForBluetoothDevices === 'function') {
+                scanForBluetoothDevices();
+              }
+            }
+          } else if (attempt < 20) {
+            setTimeout(() => tryAutoConnect(attempt + 1), 200);
+          } else {
+            Alert.alert('提示', '切库成功, 请点击"扫描蓝牙设备"按钮手动重连');
+          }
+        };
+        tryAutoConnect();
+        return;
+      }
+
+      // 路径 B: 切库后正常扫描
+      let cancelled = false;
+      const tryScan = (attempt = 0) => {
+        if (cancelled) return;
+        if (typeof scanForBluetoothDevices === 'function' && bluetoothHandler) {
+          console.log('[ConnectionScreen] 自动触发扫描, attempt=', attempt);
+          scanForBluetoothDevices();
+        } else if (attempt < 20) {
+          setTimeout(() => tryScan(attempt + 1), 200);
+        } else {
+          console.warn('[ConnectionScreen] 蓝牙处理器 4s 内未就绪, 放弃自动扫描');
+          Alert.alert('提示', '切库成功, 请点击"扫描蓝牙设备"按钮手动重连');
+        }
+      };
+      tryScan();
+
+      return () => {
+        cancelled = true;
+      };
+    }, [route?.params, navigation])
+  );
+
   const checkGlobalConnectionStatus = () => {
     if (global.deviceConnection && global.deviceConnection.device) {
       if (!isConnected) {
@@ -181,6 +265,17 @@ const ConnectionScreen = ({ navigation }) => {
           device: { id: lastDevice.deviceId, name: lastDevice.deviceName },
           handler: bluetooth,
         };
+
+        // 自动连接成功: 记录到当前库存
+        try {
+          const currentShelfId = await ShelfService.getCurrentShelfId();
+          if (currentShelfId) {
+            await ShelfService.setShelfBluetooth(currentShelfId, lastDevice.deviceId, lastDevice.deviceName);
+            console.log('[蓝牙记忆] 自动连接已绑定到库存', currentShelfId, '->', lastDevice.deviceName, lastDevice.deviceId);
+          }
+        } catch (e) {
+          console.warn('[蓝牙记忆] 自动连接保存失败:', e);
+        }
       }
     } catch (error) {
       if (autoConnectTimeoutRef.current) {
@@ -269,6 +364,7 @@ const ConnectionScreen = ({ navigation }) => {
     }
 
     setIsScanning(true);
+    setAvailableDevices([]); // 扫描开始立即清空列表, 避免显示上次的旧设备
     try {
       const devices = await bluetoothHandler.scanForDevices();
       // 按信号强度降序排：RSSI 越大（越接近 0）= 信号越强 = 越靠前
@@ -276,10 +372,11 @@ const ConnectionScreen = ({ navigation }) => {
       const sorted = sortDevicesByRssi(devices);
       setAvailableDevices(sorted);
       if (sorted.length === 0) {
-        // 2 秒未扫到任何信号强度 ≥ -90dBm 的设备，提供重扫选项
+        // 2 秒未扫到任何信号强度 ≥ -80dBm 的设备，提供重扫选项
+        // (-80dBm = 强信号, 加快扫描速度, 过滤掉远距离/穿墙的弱信号设备)
         Alert.alert(
           '未发现蓝牙设备',
-          '2 秒内未扫描到信号强度足够的设备（RSSI ≥ -90dBm）。\n请确保设备已开启且距离较近。',
+          '2 秒内未扫描到信号强度足够的设备（RSSI ≥ -80dBm）。\n请确保设备已开启且距离较近。',
           [
             { text: '取消', style: 'cancel' },
             {
@@ -324,6 +421,17 @@ const ConnectionScreen = ({ navigation }) => {
         device: device,
         handler: bluetoothHandler,
       };
+
+      // 手动连接成功: 绑定到当前库存 (实现库存-蓝牙记忆)
+      try {
+        const currentShelfId = await ShelfService.getCurrentShelfId();
+        if (currentShelfId) {
+          await ShelfService.setShelfBluetooth(currentShelfId, deviceId, device.name);
+          console.log('[蓝牙记忆] 手动连接已绑定到库存', currentShelfId, '->', device.name, deviceId);
+        }
+      } catch (e) {
+        console.warn('[蓝牙记忆] 手动连接保存失败:', e);
+      }
     } catch (error) {
       console.error('连接蓝牙设备失败:', error);
       // 获取连接日志

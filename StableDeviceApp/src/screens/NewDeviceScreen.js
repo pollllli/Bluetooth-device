@@ -23,9 +23,11 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
+import ShelfService from '../services/ShelfService';
 import { logError } from '../utils/ErrorHandler';
 import { getCategories } from '../services/DeviceCategoryService';
 import { findFirstEmptyPosition, getOccupiedPositionMap } from '../utils/positionUtils';
+import ImageUploadField from '../components/ImageUploadField';
 
 const NewDeviceScreen = ({ navigation, route }) => {
   const { onSave } = route.params || {};
@@ -43,6 +45,8 @@ const NewDeviceScreen = ({ navigation, route }) => {
     location: '',
     notes: '',
     brand: '',
+    image: '',          // 器件图片 uri (expo-image-picker 选完回调写入)
+    shelfId: '1',       // 默认占位, 真实保存时由 handleSave 覆盖为当前选中库存
     errors: {},
   };
 
@@ -75,12 +79,20 @@ const NewDeviceScreen = ({ navigation, route }) => {
   const [showPositionPicker, setShowPositionPicker] = useState(false);
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
   const [allDevices, setAllDevices] = useState([]);
+  // 标记 allDevices 是否已加载完成 (区分"加载中"和"加载完但空架")
+  // 不加这个 flag 的话, 空架时 allDevices.length === 0 永远 return, useEffect 永远不触发
+  const [allDevicesLoaded, setAllDevicesLoaded] = useState(false);
   const [expandedBank, setExpandedBank] = useState(null);
   const [categories, setCategories] = useState([]);
   const [categorySearchQuery, setCategorySearchQuery] = useState('');
   const [expandedCategory, setExpandedCategory] = useState(null);
   const currentLitPosition = useRef(null);
   const previewTimeout = useRef(null);
+
+  // 图片选择交给 ImageUploadField 组件处理, 这里只需 state 回调
+  const handleImageChange = useCallback((uri) => {
+    dispatch({ type: 'SET_FIELD', payload: { field: 'image', value: uri } });
+  }, []);
 
   /**
    * 生成器件编号
@@ -140,6 +152,7 @@ const NewDeviceScreen = ({ navigation, route }) => {
       const loadAllDevices = async () => {
         const devices = await StorageService.getDevices();
         setAllDevices(devices);
+        setAllDevicesLoaded(true);  // 标记加载完成 (即使 devices 是空数组)
       };
       const loadCategoriesData = async () => {
         try {
@@ -157,8 +170,9 @@ const NewDeviceScreen = ({ navigation, route }) => {
     }, [])
   );
 
-  const getAllPositions = () => {
-    const occupied = getOccupiedPositionMap(allDevices);
+  const getAllPositions = async () => {
+    const shelfId = await ShelfService.getCurrentShelfId();
+    const occupied = await getOccupiedPositionMap(allDevices, shelfId);
     const positions = [];
     for (let i = 0; i < 240; i++) {
       positions.push({
@@ -172,21 +186,31 @@ const NewDeviceScreen = ({ navigation, route }) => {
 
   /**
    * 自动填充第一个空位置（与扫码上架一致）:
-   * - 仅在 state.location 为空时生效
+   * - 仅在 allDevices 加载完后生效
    * - 优先查找 0-89 范围
    * - 找到后同步生成 supplierId
    * - 满架则保持 location 空,让用户手动选择
    */
   useEffect(() => {
-    if (allDevices.length === 0) return;       // 还在加载
-    if (state.location) return;                // 用户已选,跳过
-    const empty = findFirstEmptyPosition(allDevices, 90);
-    if (empty == null) return;                 // 满架,保持空让用户选
-    dispatch({
-      type: 'SET_FIELDS',
-      payload: { location: empty, supplierId: generateSupplierId(empty) },
-    });
-  }, [allDevices, state.location]);
+    (async () => {
+      if (!allDevicesLoaded) return;             // 还在加载, 跳过
+      if (state.location) return;                // 用户已选, 跳过
+      const shelfId = await ShelfService.getCurrentShelfId();
+      const empty = findFirstEmptyPosition(allDevices, shelfId, 90);
+      if (empty == null) return;                 // 满架, 保持空让用户选
+      // 自动分配第一个空位 + 自动生成编号
+      const newSupplierId = generateSupplierId(empty);
+      dispatch({
+        type: 'SET_FIELDS',
+        payload: { location: empty, supplierId: newSupplierId },
+      });
+      // 关键: 找到空位后, 立即亮灯提示用户这个位置将被分配
+      if (global.deviceConnection && global.deviceConnection.handler) {
+        sendLightCommand('lightOn', empty);
+        currentLitPosition.current = empty;
+      }
+    })();
+  }, [allDevicesLoaded, allDevices, state.location]);
 
   /**
    * 选中位置后：更新位置 + 自动生成 supplierId
@@ -235,9 +259,9 @@ const NewDeviceScreen = ({ navigation, route }) => {
     if (!state.name.trim()) {
       errors.name = '请输入器件名称';
     }
-    if (!state.location) {
-      errors.location = '请选择存放位置';
-    }
+    // 位置不是必填项:
+    //   - 用户没选时, useEffect 会自动分配第一个空位(并亮灯提示)
+    //   - 满架时 location 留空, 让用户手动选位
     return errors;
   };
 
@@ -251,17 +275,29 @@ const NewDeviceScreen = ({ navigation, route }) => {
 
     setIsLoading(true);
     try {
+      // 兜底: 如果 useEffect 没跑成功 (如 allDevices 异步加载慢, 用户秒保存),
+      //       或用户手动选过位置但 supplierId 丢失, 这里用 state.location 重新生成
+      const finalLocation = state.location || (() => {
+        // 极端情况: 连位置都没自动分配 (满架 or 异步未就绪)
+        // 这里不强行分配, 交给上层的"未选位置"提示
+        return '';
+      })();
+      const finalSupplierId = state.supplierId
+        || (finalLocation ? generateSupplierId(finalLocation) : '');
+      // 多库存: 器件归属当前选中库存
+      const currentShelfId = await ShelfService.getCurrentShelfId();
       const deviceData = {
         id: Date.now(),
-        supplierId: state.supplierId,
+        supplierId: finalSupplierId,
         name: state.name.trim(),
         category: state.category,
         package: state.package.trim(),
         quantity: parseInt(state.quantity) || 1,
-        location: state.location,
+        location: finalLocation,
         notes: state.notes.trim(),
         brand: state.brand.trim(),
-        shelfId: '1',
+        shelfId: currentShelfId,
+        image: state.image || '',          // 图片 uri (来自 expo-image-picker)
       };
 
       let savedDevice;
@@ -308,19 +344,33 @@ const NewDeviceScreen = ({ navigation, route }) => {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>基本信息</Text>
 
-            {/* 1. 编号（只读，自动生成） */}
+            {/* 1. 编号（只读，自动生成） + 添加图片 (50:50) */}
             <View style={styles.formGroup}>
-              <Text style={styles.label}>编号（自动生成）</Text>
-              <View style={styles.supplierIdBox}>
-                <Text
-                  style={[
-                    styles.supplierIdText,
-                    !state.supplierId && styles.supplierIdPlaceholder,
-                  ]}
-                  numberOfLines={1}
-                >
-                  {state.supplierId || '请先选择下方"位置"以生成编号'}
-                </Text>
+              <View style={styles.row}>
+                {/* 编号 - 50% (只读自动生成) */}
+                <View style={styles.halfWidth}>
+                  <Text style={styles.label}>编号（自动生成）</Text>
+                  <View style={styles.supplierIdBox}>
+                    <Text
+                      style={[
+                        styles.supplierIdText,
+                        !state.supplierId && styles.supplierIdPlaceholder,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {state.supplierId || 'H + 日期 + 位置'}
+                    </Text>
+                  </View>
+                </View>
+                {/* 添加图片 - 50% */}
+                <View style={styles.halfWidth}>
+                  <ImageUploadField
+                    value={state.image}
+                    onChange={handleImageChange}
+                    label="图片"
+                    height={80}
+                  />
+                </View>
               </View>
             </View>
 
@@ -370,14 +420,11 @@ const NewDeviceScreen = ({ navigation, route }) => {
               />
             </View>
 
-            {/* 5. 位置（必填） */}
+            {/* 5. 位置（不是必填, 不选时自动分配第一个空位并亮灯） */}
             <View style={styles.formGroup}>
-              <Text style={styles.label}>位置 *</Text>
+              <Text style={styles.label}>位置</Text>
               <TouchableOpacity
-                style={[
-                  styles.positionButton,
-                  state.errors.location && styles.inputError,
-                ]}
+                style={styles.positionButton}
                 onPress={() => {
                   if (!global.deviceConnection) {
                     Alert.alert(
@@ -395,9 +442,6 @@ const NewDeviceScreen = ({ navigation, route }) => {
                     : '点击选择位置'}
                 </Text>
               </TouchableOpacity>
-              {state.errors.location && (
-                <Text style={styles.errorText}>{state.errors.location}</Text>
-              )}
             </View>
 
             {/* 6. 备注 */}
@@ -686,6 +730,14 @@ const styles = StyleSheet.create({
   formGroup: {
     marginBottom: 16,
   },
+  halfWidth: {
+    width: '48%',
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',  // top 对齐, 允许左右高度不同
+  },
   label: {
     fontSize: 14,
     fontWeight: '600',
@@ -731,6 +783,24 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     fontStyle: 'italic',
     fontFamily: Platform.OS === 'ios' ? undefined : 'sans-serif',
+  },
+  // 添加图片方框 (朋友圈风格: 浅灰底 + 灰色加号)
+  imageUploadBox: {
+    height: 80,  // 比编号输入框稍高 (和 AdminEditScreen 保持一致)
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    borderStyle: 'dashed',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageUploadPlus: {
+    fontSize: 40,
+    fontWeight: '300',
+    color: '#999',
+    lineHeight: 40,
+    includeFontPadding: false,
   },
   saveButton: {
     backgroundColor: '#4caf50',
