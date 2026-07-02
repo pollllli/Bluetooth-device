@@ -242,7 +242,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       const pending = consumePendingAutoConnect();
       if (pending.mac) {
         console.log('[DeviceListScreen] 检测到待自动连, 后台连接:', pending.mac);
-        // 后台静默连, 失败仅 console.warn, 不弹 Alert 不导航
+        // 后台静默连, 5s 内连不上视为"目标蓝牙不在范围"
         autoConnectBluetooth(pending.mac, pending.name).then((result) => {
           if (result.ok) {
             console.log('[DeviceListScreen] 后台自动连成功, 刷新连接状态');
@@ -250,6 +250,29 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
             dispatch({ type: 'SET_CONNECTED', payload: true });
           } else {
             console.warn('[DeviceListScreen] 后台自动连失败:', result.reason);
+            // 5s 仍未连上 (一般是"目标蓝牙不在范围"), 在首页弹提示让用户去手动连
+            // 关键: 不要在没有 pending.mac 的普通 focus 触发弹窗, 只在导入触发的这次失败才弹
+            Alert.alert(
+              '蓝牙不在范围',
+              `目标蓝牙「${pending.name || pending.mac}」不在范围内或未开启, 请到"连接"页手动扫描连接。`,
+              [
+                {
+                  text: '稍后',
+                  style: 'cancel',
+                  onPress: () => { /* 留在首页, 用户可继续浏览器件 */ },
+                },
+                {
+                  text: '去连接',
+                  onPress: () => {
+                    // 跳到连接页, 用户可手动扫描附近蓝牙
+                    navigation.navigate('Connection', {
+                      autoConnectMac: pending.mac,
+                      autoConnectName: pending.name,
+                    });
+                  },
+                },
+              ]
+            );
           }
         });
       }
@@ -323,12 +346,24 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       ]);
 
       await connectWithTimeout;
-      
+
       global.deviceConnection = {
         type: 'bluetooth',
         device: { id: lastDevice.deviceId, name: lastDevice.deviceName },
         handler: bluetoothHandler,
       };
+
+      // 关键: 重新连接成功时, 也要把设备绑定到"当前库存" —
+      // 实现"库存-蓝牙记忆", 导出时取的就是这个 last-connected MAC
+      try {
+        const currentShelfId = await ShelfService.getCurrentShelfId();
+        if (currentShelfId) {
+          await ShelfService.setShelfBluetooth(currentShelfId, lastDevice.deviceId, lastDevice.deviceName);
+          console.log('[蓝牙记忆] handleReconnect 已绑定到库存', currentShelfId, '->', lastDevice.deviceName);
+        }
+      } catch (bindErr) {
+        console.warn('[蓝牙记忆] handleReconnect 绑定失败:', bindErr);
+      }
 
       dispatch({ type: 'SET_CONNECTED', payload: true });
       showSuccessMessage(`已连接到设备: ${lastDevice.deviceName}`);

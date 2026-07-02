@@ -143,20 +143,21 @@ export async function autoConnectBluetooth(mac, name) {
     console.log('[autoConnectBluetooth] 已自创建 BluetoothHandler 实例');
   }
 
-  // 3) 调用底层连接 (带超时, 防止心跳校验卡死)
+  // 3) 调用底层连接 (带超时 5s, 防止心跳校验 / 设备不在范围时卡死)
+  //    5s 是用户要求的"蓝牙不在范围"判定阈值: 超过 5s 未连上, 视为目标不在范围
   try {
     const connectWithTimeout = Promise.race([
       handler.connectToDevice(mac),
       new Promise(function (_, reject) {
-        setTimeout(function () { reject(new Error('连接超时 (12s)')); }, 12000);
+        setTimeout(function () { reject(new Error('连接超时 (5s)')); }, 5000);
       }),
     ]);
     await connectWithTimeout;
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     console.warn('[autoConnectBluetooth] 连接失败:', msg);
-    showToast('蓝牙自动连接失败, 请到"连接"页手动连');
-    return { ok: false, reason: 'connect_failed' };
+    showToast('目标蓝牙不在范围内');
+    return { ok: false, reason: 'connect_failed', message: msg };
   }
 
   // 4) 成功: 构造 device 对象 (ConnectionScreen 内也是这样处理)
