@@ -1014,11 +1014,15 @@ class StorageService {
       throw new Error('未选择任何库存');
     }
     const result = [];
-    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     for (const shelf of shelves) {
       const backup = await this.exportAllData({ shelfId: shelf.id });
-      const safeName = (shelf.name || '库存').replace(/[\\/:*?"<>|]/g, '_');
-      const fileName = `库存_${safeName}_${dateStr}.json`;
+      // 关键: 文件名直接用库存名(去掉不合法字符, 保留中文/英文/数字/常用符号)
+      // 例如: 库存A.json  (旧版: 库存_库存A_20260702.json)
+      // 这样从微信导入时, 可以直接根据文件名判断是新增还是覆盖
+      const safeName = (shelf.name || '未命名库存')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim() || '未命名库存';
+      const fileName = `${safeName}.json`;
       result.push({ shelf, backup, fileName });
     }
     return result;
@@ -1149,6 +1153,177 @@ class StorageService {
       return { restoredImageCount, failedImageCount };
     } catch (error) {
       logError('导入数据失败', error, 'StorageService.importAllData');
+      throw error;
+    }
+  }
+
+  /**
+   * 从文件导入单个库存 (新流程)
+   *
+   * 设计目标: 多次从微信导入时, 不会覆盖其他库存, 而是在已有基础上添加
+   *
+   * 关键逻辑:
+   * 1. 用 fileName(去掉 .json 后缀) 作为"目标库存名"
+   * 2. 如果本地已有同名库存 → 覆盖该库存的器件数据(保留其 id, 以免误删器件)
+   * 3. 如果本地没有同名库存 → 自动新增一个库存, 并把导入的器件放到这个新库存下
+   * 4. 导入完成后, 把"目标库存"设置为当前库存(切库动作)
+   * 5. 不影响 BOM / users / categories / searchHistory 等其他数据
+   * 6. 不影响其他库存的器件
+   *
+   * @param {string} fileName - 原始文件名(来自微信分享/手动选择), 例: "库存A.json"
+   * @param {Object} backupData - 备份数据对象 (来自 exportAllData 序列化后的 JSON)
+   * @returns {Promise<{shelfId:string, shelfName:string, isNew:boolean, action:'overwrite'|'add', deviceCount:number, restoredImageCount:number, failedImageCount:number, bluetoothMac?:string, bluetoothName?:string}>}
+   */
+  static async importShelfFromFile(fileName, backupData) {
+    try {
+      if (!backupData || !backupData.data) {
+        throw new Error('无效的备份数据');
+      }
+
+      // 1) 验证备份数据版本 (兼容 1.0.0 / 1.1.0 / 1.2.0 / 1.3.0)
+      const version = backupData.version || '1.0.0';
+      const supportedVersions = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'];
+      if (!supportedVersions.includes(version)) {
+        throw new Error('备份数据版本不兼容');
+      }
+
+      // 2) 解析文件名 → 目标库存名
+      // 微信分享时, fileName 可能包含 .json 后缀; 也可能没有
+      // 还需要把微信那边 URL 编码过的字符解码
+      let rawName = (fileName || '').toString();
+      try {
+        rawName = decodeURIComponent(rawName);
+      } catch (e) {
+        // 解码失败就用原文
+      }
+      // 去掉 .json / .JSON 等后缀, 以及路径中可能的前缀
+      rawName = rawName.split(/[\\/]/).pop() || rawName;
+      rawName = rawName.replace(/\.json$/i, '').trim();
+      // 万一文件名为空, 给一个默认名 (不应该发生)
+      const targetShelfName = rawName || '导入的库存';
+      console.log('[importShelfFromFile] fileName=', fileName, '→ 目标库存名:', targetShelfName);
+
+      // 3) 1.2.0 / 1.3.0 备份里的器件图片是 _imageBase64 字段
+      //    解码写入本机沙盒, 把 device.image 替换为 file:// 沙盒路径
+      let restoredImageCount = 0;
+      let failedImageCount = 0;
+      if ((version === '1.2.0' || version === '1.3.0') && Array.isArray(backupData.data.devices)) {
+        for (const device of backupData.data.devices) {
+          if (device && device._imageBase64) {
+            const fname = `${device.id || Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+            const fileUri = await this.#writeBase64AsImage(device._imageBase64, fname);
+            if (fileUri) {
+              device.image = fileUri;
+              restoredImageCount++;
+            } else {
+              failedImageCount++;
+              device.image = '';
+            }
+            delete device._imageBase64;
+          }
+        }
+      }
+
+      // 4) 决定是覆盖还是新增
+      //    加载本地 shelves (绕过 ShelfService 缓存, 走原始 AsyncStorage)
+      const localShelvesRaw = await getData('shelves', null);
+      const localShelves = Array.isArray(localShelvesRaw) && localShelvesRaw.length > 0
+        ? localShelvesRaw
+        : [{ id: '1', name: '库存（一）' }];
+
+      const existing = localShelves.find((s) => s && s.name === targetShelfName);
+
+      // 从备份里取"源库存"的元数据 (蓝牙绑定等)
+      // 旧版备份没有 shelves 字段, 这种情况下没有源库存信息
+      const backupShelves = Array.isArray(backupData.data.shelves) ? backupData.data.shelves : [];
+      // 单库存导出的文件里, shelves 通常只有 1 个; 取第一个即可
+      const sourceShelf = backupShelves[0] || {};
+      const sourceBluetoothMac = sourceShelf.bluetoothMac || '';
+      const sourceBluetoothName = sourceShelf.bluetoothName || '';
+
+      let targetShelfId;
+      let isNew;
+      let action;
+
+      if (existing) {
+        // 覆盖: 保留现有库存 id, 这样 ShelfService 不会因 id 变化而误判
+        targetShelfId = existing.id;
+        isNew = false;
+        action = 'overwrite';
+        // 蓝牙绑定: 如果导入的数据有更新的绑定, 覆盖; 否则保留本地
+        if (sourceBluetoothMac) {
+          existing.bluetoothMac = sourceBluetoothMac;
+          existing.bluetoothName = sourceBluetoothName;
+        }
+        console.log('[importShelfFromFile] 覆盖现有库存:', targetShelfName, 'id=', targetShelfId);
+      } else {
+        // 新增: 生成新 id, 沿用导入的蓝牙绑定
+        targetShelfId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const newShelf = { id: targetShelfId, name: targetShelfName };
+        if (sourceBluetoothMac) {
+          newShelf.bluetoothMac = sourceBluetoothMac;
+          newShelf.bluetoothName = sourceBluetoothName;
+        }
+        localShelves.push(newShelf);
+        isNew = true;
+        action = 'add';
+        console.log('[importShelfFromFile] 新增库存:', targetShelfName, 'id=', targetShelfId);
+      }
+
+      // 5) 处理器件
+      //    - 取出本地全部器件
+      //    - 删掉"目标库存"下的旧器件 (覆盖语义)
+      //    - 把导入的器件的 shelfId 全部改写为"目标库存 id" (适配新 id)
+      //    - 与其他库存的器件合并保存
+      const localDevices = await this.getDevices();
+      const otherShelfDevices = localDevices.filter((d) => d && d.shelfId !== targetShelfId);
+
+      const importedDevicesRaw = Array.isArray(backupData.data.devices) ? backupData.data.devices : [];
+      const importedDevices = importedDevicesRaw.map((d) => {
+        if (!d) return d;
+        // 关键: 不管源文件里 shelfId 是什么(可能是源 id, 可能没有, 可能是别的库存),
+        // 都统一改写为目标库存 id, 避免出现"导入到错的库存"或"导入后无库存归属"
+        return { ...d, shelfId: targetShelfId };
+      });
+
+      const mergedDevices = [...otherShelfDevices, ...importedDevices];
+      await this.saveDevices(mergedDevices);
+      console.log('[importShelfFromFile] 器件合并完成: 其他库存', otherShelfDevices.length, '个 + 导入',
+        importedDevices.length, '个 = 总计', mergedDevices.length, '个');
+
+      // 6) 写回 shelves (覆盖场景可能改了 bluetoothMac/bluetoothName)
+      await saveData('shelves', localShelves);
+
+      // 7) 切换 currentShelfId 为导入的库存 (导入完成, 当前库存跟随)
+      await saveData('currentShelfId', targetShelfId);
+
+      // 8) 清除缓存
+      this.#clearCache('devices');
+      try {
+        const ShelfService = require('./ShelfService');
+        if (ShelfService && typeof ShelfService.clearShelvesCache === 'function') {
+          ShelfService.clearShelvesCache();
+        }
+      } catch (clearCacheErr) {
+        // ignore
+      }
+
+      // 9) 读一下最终的目标库存(用于返回蓝牙绑定等元数据)
+      const finalShelf = localShelves.find((s) => s && s.id === targetShelfId) || {};
+
+      return {
+        shelfId: targetShelfId,
+        shelfName: targetShelfName,
+        isNew,
+        action,
+        deviceCount: importedDevices.length,
+        restoredImageCount,
+        failedImageCount,
+        bluetoothMac: finalShelf.bluetoothMac || '',
+        bluetoothName: finalShelf.bluetoothName || '',
+      };
+    } catch (error) {
+      logError('从文件导入库存失败', error, 'StorageService.importShelfFromFile');
       throw error;
     }
   }

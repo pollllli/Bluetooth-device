@@ -412,8 +412,15 @@ export default function App() {
   };
 
   /**
-   * 确认导入外部文件
-   * 流程：读取文件 → 解析 JSON → 调用 StorageService 导入 → 提示成功并跳回主页
+   * 确认导入外部文件 (新流程: 按文件名作为库存名, 同名覆盖/异名新增)
+   *
+   * 关键设计:
+   * - 文件名去掉 .json 后缀即作为"目标库存名"
+   * - 本地已有同名库存 → 覆盖该库存的器件
+   * - 本地无同名库存 → 自动新增该库存
+   * - 导入完成后, "目标库存" 切换为当前库存 (后台静默切库, 不弹切库提示)
+   * - 如果目标库存绑定了蓝牙, 通过 setPendingAutoConnect 标记, 让 DeviceListScreen 自动连
+   * - 不影响 BOM / users / categories / 其他库存数据
    */
   const handleConfirmImport = async () => {
     if (!pendingImportUri) return;
@@ -421,34 +428,13 @@ export default function App() {
     try {
       const fileContent = await readImportFile(pendingImportUri);
       const backupData = JSON.parse(fileContent);
-      const result = await StorageService.importAllData(backupData);
+      const result = await StorageService.importShelfFromFile(pendingImportName, backupData);
 
-      // 关键: 拿到 currentShelf 绑定的蓝牙, 设为待自动连
-      // DeviceListScreen 获得焦点时会消费这个, 自动跳到连接页
-      try {
-        const data = backupData?.data || {};
-        let mac = null;
-        let name = null;
-        // 1) 优先用 currentShelf 的绑定
-        if (Array.isArray(data.shelves) && data.currentShelfId) {
-          const cur = data.shelves.find((s: any) => s && s.id === data.currentShelfId);
-          if (cur && cur.bluetoothMac) {
-            mac = cur.bluetoothMac;
-            name = cur.bluetoothName || null;
-          }
-        }
-        // 2) 兜底用 lastConnectedDevice
-        if (!mac && data.lastConnectedDevice) {
-          const lcd = data.lastConnectedDevice;
-          mac = lcd.deviceId || lcd.id || null;
-          name = lcd.deviceName || lcd.name || null;
-        }
-        if (mac) {
-          setPendingAutoConnect(mac, name);
-          console.log('[App.handleConfirmImport] 标记待自动连:', mac, name);
-        }
-      } catch (acErr) {
-        console.warn('[App.handleConfirmImport] 获取自动连目标失败:', acErr);
+      // 关键: 把"目标库存"绑定的蓝牙标记为待自动连
+      // DeviceListScreen 获得焦点时会消费这个标记, 后台静默连, 不弹切库提示
+      if (result.bluetoothMac) {
+        setPendingAutoConnect(result.bluetoothMac, result.bluetoothName || '');
+        console.log('[App.handleConfirmImport] 标记待自动连:', result.bluetoothMac, result.bluetoothName);
       }
 
       // 关闭弹窗并清理状态
@@ -457,9 +443,13 @@ export default function App() {
       setPendingImportName('');
       setIsImporting(false);
 
+      const actionLabel = result.action === 'add' ? '已新增' : '已覆盖';
+      const imageNote = result.restoredImageCount > 0
+        ? `\n已恢复 ${result.restoredImageCount} 张图片${result.failedImageCount > 0 ? ` (${result.failedImageCount} 张失败)` : ''}`
+        : '';
       Alert.alert(
         '导入成功',
-        `文件 "${importedName}" 已成功导入！\n\n应用将跳转到库存首页加载新数据。`,
+        `文件 "${importedName}" ${actionLabel}为库存"${result.shelfName}",共 ${result.deviceCount} 个器件。${imageNote}\n\n应用将自动切到该库存并尝试连接其绑定的蓝牙。`,
         [
           {
             text: '确定',
@@ -672,7 +662,7 @@ export default function App() {
               <Text style={styles.modalTip}>
                 是否将该数据导入到本 App？{'\n'}
                 <Text style={styles.modalTipWarn}>
-                  注意：此操作将覆盖当前所有数据。
+                  系统将根据文件名判断: 同名库存会覆盖, 异名库存会新增; 不会影响其他库存。
                 </Text>
               </Text>
 

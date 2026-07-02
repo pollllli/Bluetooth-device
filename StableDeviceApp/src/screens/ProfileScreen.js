@@ -269,95 +269,82 @@ const ProfileScreen = ({ navigation, route }) => {
     }
   };
 
-  // 数据导入
+  // 数据导入 (新流程: 按文件名作为库存名, 同名覆盖/异名新增)
   const handleImportData = async () => {
-    Alert.alert('数据导入', '此操作将覆盖当前所有数据，确定要继续吗？', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '确定',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const result = await DocumentPicker.getDocumentAsync({
-              type: 'application/json',
-              copyToCacheDirectory: true,
-            });
-
-            if (result.canceled) {
-              return;
-            }
-
-            const fileUri = result.assets[0].uri;
-            const fileContent = await FileSystem.readAsStringAsync(fileUri);
-            const backupData = JSON.parse(fileContent);
-
-            await StorageService.importAllData(backupData);
-
-            // 导入完成后清空库存缓存, 重新加载
-            ShelfService.clearShelvesCache();
-
-            // 关键: 导入完成后, 自动获取当前库存的蓝牙绑定,
-            // 让用户进入 app 后能"自动跳到连接页"并直接连上绑定的蓝牙,
-            // 不用再去手动点"未连接"按钮才能扫描
-            let autoConnectMac = null;
-            let autoConnectName = null;
+    Alert.alert(
+      '数据导入',
+      '系统将根据文件名判断:\n• 同名库存 → 覆盖该库存的器件\n• 异名库存 → 自动新增为新库存\n\n此操作不会影响其他库存。',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '选择文件',
+          onPress: async () => {
             try {
-              // 优先用 currentShelf 的绑定 (最准确)
-              const curShelfId = await ShelfService.getCurrentShelfId();
-              if (curShelfId) {
-                const allShelves = await ShelfService.getShelves();
-                const cur = allShelves.find((s) => s.id === curShelfId);
-                if (cur && cur.bluetoothMac) {
-                  autoConnectMac = cur.bluetoothMac;
-                  autoConnectName = cur.bluetoothName || null;
-                }
-              }
-              // 兜底: 拿不到 shelf 绑定就用 lastConnectedDevice
-              if (!autoConnectMac) {
-                const lcd = await StorageService.getLastConnectedDevice();
-                if (lcd && (lcd.deviceId || lcd.id)) {
-                  autoConnectMac = lcd.deviceId || lcd.id;
-                  autoConnectName = lcd.deviceName || lcd.name || null;
-                }
-              }
-              console.log('[handleImportData] 导入后自动连接目标:', autoConnectMac, autoConnectName);
-            } catch (acErr) {
-              console.warn('[handleImportData] 获取自动连接目标失败:', acErr);
-            }
+              const result = await DocumentPicker.getDocumentAsync({
+                type: 'application/json',
+                copyToCacheDirectory: true,
+              });
 
-            Alert.alert('成功', '数据导入成功！\n\n应用将跳转到库存首页加载新数据。', [
-              {
-                text: '确定',
-                onPress: async () => {
-                  // 关键: 导入完成后, 不管有没有绑定蓝牙, 都先跳到库存首页
-                  // 如果有绑定蓝牙, 通过 setPendingAutoConnect 标记"待自动连"
-                  // DeviceListScreen mount 时会消费这个标记, 自动跳到连接页
-                  if (autoConnectMac) {
-                    setPendingAutoConnect(autoConnectMac, autoConnectName);
-                  }
-                  // 跳到库存首页 (DeviceListTab 是 Tab.Navigator 的第一个 tab, 即默认 tab)
-                  navigation.reset({
-                    index: 0,
-                    routes: [
-                      {
-                        name: 'MainTabs',
-                        params: { screen: 'DeviceListTab' },
-                      },
-                    ],
-                  });
-                },
-              },
-            ]);
-          } catch (error) {
-            logError('导入数据失败', error, 'ProfileScreen.handleImportData');
-            Alert.alert(
-              '错误',
-              `导入数据失败: ${error.message || '请检查文件格式并重试'}`
-            );
-          }
+              if (result.canceled) {
+                return;
+              }
+
+              const fileUri = result.assets[0].uri;
+              // 关键: 优先用系统返回的文件名, 这样"按文件名判断"才有效
+              const fileName = result.assets[0].name || 'imported.json';
+              const fileContent = await FileSystem.readAsStringAsync(fileUri);
+              const backupData = JSON.parse(fileContent);
+
+              // 用新的"按文件名导入"流程, 替代旧的"覆盖全部数据"
+              const importResult = await StorageService.importShelfFromFile(fileName, backupData);
+
+              // 导入完成后清空库存缓存, 重新加载
+              ShelfService.clearShelvesCache();
+
+              // 关键: 把"目标库存"绑定的蓝牙标记为待自动连
+              // DeviceListScreen 获得焦点时会消费这个标记, 后台静默连, 不弹切库提示
+              if (importResult.bluetoothMac) {
+                setPendingAutoConnect(importResult.bluetoothMac, importResult.bluetoothName || '');
+                console.log('[handleImportData] 标记待自动连:', importResult.bluetoothMac, importResult.bluetoothName);
+              }
+
+              const actionLabel = importResult.action === 'add' ? '已新增' : '已覆盖';
+              const imageNote = importResult.restoredImageCount > 0
+                ? `\n已恢复 ${importResult.restoredImageCount} 张图片${importResult.failedImageCount > 0 ? ` (${importResult.failedImageCount} 张失败)` : ''}`
+                : '';
+              Alert.alert(
+                '导入成功',
+                `文件 "${fileName}" ${actionLabel}为库存"${importResult.shelfName}",共 ${importResult.deviceCount} 个器件。${imageNote}\n\n应用将自动切到该库存并尝试连接其绑定的蓝牙。`,
+                [
+                  {
+                    text: '确定',
+                    onPress: () => {
+                      // 跳到库存首页 (DeviceListTab 是 Tab.Navigator 的第一个 tab, 即默认 tab)
+                      // 切库动作在 importShelfFromFile 内部已完成, 这里只负责跳转 UI
+                      navigation.reset({
+                        index: 0,
+                        routes: [
+                          {
+                            name: 'MainTabs',
+                            params: { screen: 'DeviceListTab' },
+                          },
+                        ],
+                      });
+                    },
+                  },
+                ]
+              );
+            } catch (error) {
+              logError('导入数据失败', error, 'ProfileScreen.handleImportData');
+              Alert.alert(
+                '错误',
+                `导入数据失败: ${error.message || '请检查文件格式并重试'}`
+              );
+            }
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   return (
