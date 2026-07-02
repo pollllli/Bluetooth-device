@@ -7,14 +7,20 @@
  * - 其他需要"在当前页内自动连、不跳连接页"的场景
  *
  * 区别于 ConnectionScreen 内的 connectToBluetoothDevice:
- * - 不弹 Alert 错误 (后台静默, 失败只 console.warn)
+ * - 不弹 Alert 错误 (后台静默, 失败只 Toast / console.warn)
  * - 不 setAvailableDevices / setConnectedDevice (那些是 ConnectionScreen 的本地 state)
  * - 仍然更新 global.deviceConnection + ShelfService.setShelfBluetooth
  *
  * 关键: 不依赖 React Navigation, 不导航, 调用方保持在原页面
+ *
+ * 关键: 之前 `waitForHandler` 假设全局已有 BluetoothHandler 实例, 但
+ * ConnectionScreen 里的 handler 是 useState 本地变量, 离开页面就丢;
+ * 导入流程 (用户从来没见过 ConnectionScreen) 时根本没有 handler,
+ * 自动连一定失败。现改为: 没有 handler 时自己 new + initialize 一个
+ * (和 DeviceListScreen.handleReconnect / UserContext.tryAutoConnectBluetooth 同模式)
  */
 
-import { Alert, Platform, PermissionsAndroid } from 'react-native';
+import { Platform, PermissionsAndroid, ToastAndroid } from 'react-native';
 import BluetoothHandler from '../services/BluetoothHandler';
 import ShelfService from '../services/ShelfService';
 
@@ -43,28 +49,67 @@ async function ensureBluetoothPermissions() {
 }
 
 /**
- * 等 BluetoothHandler 全局单例就绪
- * ConnectionScreen 里会先 setBluetoothHandler, 别的页面调用时可能还没就绪
- * @param {number} maxAttempts
- * @returns {Promise<object|null>}
+ * 拿到一个可用的 BluetoothHandler 实例
+ *
+ * 优先级:
+ * 1. 已有全局连接 (global.deviceConnection.handler) → 直接用, 避免重复创建 BleManager
+ * 2. 上次应用启动时 UserContext 缓存到 global.deviceConnection 的 handler → 复用
+ * 3. 都没有 → 自己 new + initialize 一个临时实例
+ *
+ * @returns {Promise<{handler: object, createdNew: boolean}|null>}
  */
-async function waitForHandler(maxAttempts) {
-  const max = maxAttempts || 20;
-  for (let i = 0; i < max; i++) {
-    const handler = BluetoothHandler && (BluetoothHandler.instance || BluetoothHandler);
-    if (handler && typeof handler.connectToDevice === 'function') {
-      return handler;
-    }
-    await new Promise(function (r) { setTimeout(r, 200); });
+async function getOrCreateHandler() {
+  // 1) 全局已有连接
+  if (global.deviceConnection && global.deviceConnection.handler
+      && typeof global.deviceConnection.handler.connectToDevice === 'function') {
+    return { handler: global.deviceConnection.handler, createdNew: false };
   }
-  return null;
+
+  // 2) 全局已有 handler 但没连接 (极少, 但兼容)
+  if (global._bluetoothHandlerInstance
+      && typeof global._bluetoothHandlerInstance.connectToDevice === 'function') {
+    return { handler: global._bluetoothHandlerInstance, createdNew: false };
+  }
+
+  // 3) 都没有, 自己创建
+  try {
+    console.log('[autoConnectBluetooth] 未发现可用 handler, 自创建...');
+    const handler = new BluetoothHandler();
+    const initRes = await handler.initialize();
+    if (!initRes || initRes.success === false) {
+      console.warn('[autoConnectBluetooth] 蓝牙管理器初始化失败:', initRes && initRes.message);
+      return null;
+    }
+    // 缓存到 global, 下次自动连 / 其他场景可复用
+    global._bluetoothHandlerInstance = handler;
+    return { handler, createdNew: true };
+  } catch (e) {
+    console.warn('[autoConnectBluetooth] 创建 handler 失败:', e && e.message);
+    return null;
+  }
+}
+
+/**
+ * 弹一个简短的 Android Toast 提示用户
+ * iOS / Web 平台静默忽略
+ */
+function showToast(text) {
+  if (Platform.OS === 'android' && ToastAndroid && typeof ToastAndroid.show === 'function') {
+    try {
+      ToastAndroid.show(text, ToastAndroid.SHORT);
+    } catch (e) {
+      // ignore
+    }
+  } else {
+    console.log('[autoConnectBluetooth][toast]', text);
+  }
 }
 
 /**
  * 静默自动连接指定 MAC 的蓝牙设备
  * - 不弹任何 Alert 错误
  * - 不导航
- * - 失败仅 console.warn
+ * - 失败用 ToastAndroid 短提示, 同时 console.warn
  * - 成功会更新 global.deviceConnection + 绑定到当前 shelf
  *
  * @param {string} mac - 设备 MAC
@@ -76,27 +121,41 @@ export async function autoConnectBluetooth(mac, name) {
     return { ok: false, reason: 'mac 为空' };
   }
   console.log('[autoConnectBluetooth] 开始后台自动连, mac=', mac, 'name=', name);
+  showToast(`正在连接蓝牙...`);
 
   // 1) 权限检查
   const hasPerm = await ensureBluetoothPermissions();
   if (!hasPerm) {
     console.warn('[autoConnectBluetooth] 权限未授予, 放弃');
+    showToast('蓝牙权限未授予, 自动连接取消');
     return { ok: false, reason: 'permission_denied' };
   }
 
-  // 2) 等 handler 就绪
-  const handler = await waitForHandler(20);
-  if (!handler) {
-    console.warn('[autoConnectBluetooth] BluetoothHandler 4s 内未就绪');
+  // 2) 拿到/创建 handler
+  const got = await getOrCreateHandler();
+  if (!got) {
+    console.warn('[autoConnectBluetooth] 无法获取蓝牙管理器实例');
+    showToast('蓝牙初始化失败, 自动连接取消');
     return { ok: false, reason: 'handler_not_ready' };
   }
+  const handler = got.handler;
+  if (got.createdNew) {
+    console.log('[autoConnectBluetooth] 已自创建 BluetoothHandler 实例');
+  }
 
-  // 3) 调用底层连接
+  // 3) 调用底层连接 (带超时, 防止心跳校验卡死)
   try {
-    await handler.connectToDevice(mac);
+    const connectWithTimeout = Promise.race([
+      handler.connectToDevice(mac),
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('连接超时 (12s)')); }, 12000);
+      }),
+    ]);
+    await connectWithTimeout;
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     console.warn('[autoConnectBluetooth] 连接失败:', msg);
+    showToast('蓝牙自动连接失败, 请到"连接"页手动连');
     return { ok: false, reason: 'connect_failed' };
   }
 
@@ -122,5 +181,6 @@ export async function autoConnectBluetooth(mac, name) {
   }
 
   console.log('[autoConnectBluetooth] 自动连成功, mac=', mac);
+  showToast(`已自动连接: ${device.name}`);
   return { ok: true };
 }

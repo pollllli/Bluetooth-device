@@ -1236,10 +1236,19 @@ class StorageService {
       // 从备份里取"源库存"的元数据 (蓝牙绑定等)
       // 旧版备份没有 shelves 字段, 这种情况下没有源库存信息
       const backupShelves = Array.isArray(backupData.data.shelves) ? backupData.data.shelves : [];
-      // 单库存导出的文件里, shelves 通常只有 1 个; 取第一个即可
-      const sourceShelf = backupShelves[0] || {};
+      // 关键: 备份里通常是全部 shelves (exportAllData 不剔除其他库存),
+      // 不能再用 backupShelves[0] 拿绑定 — 那样会拿到一个"恰好排第一的库存"的 MAC,
+      // 而不是用户真正导出的那个。
+      // 优先用"按文件名解析出的库存名"在备份 shelves 里精确匹配。
+      let sourceShelf = backupShelves.find((s) => s && s.name === targetShelfName) || {};
+      if (!sourceShelf || !sourceShelf.id) {
+        // 兜底: 旧版备份里没有 shelves, 退化为取第一个
+        sourceShelf = backupShelves[0] || {};
+      }
       const sourceBluetoothMac = sourceShelf.bluetoothMac || '';
       const sourceBluetoothName = sourceShelf.bluetoothName || '';
+      console.log('[importShelfFromFile] 源库存解析:', sourceShelf.id, sourceShelf.name,
+        'mac=', sourceBluetoothMac, 'name=', sourceBluetoothName);
 
       let targetShelfId;
       let isNew;
