@@ -24,7 +24,39 @@ const CURRENT_SHELF_KEY = 'currentShelfId';
 let _shelvesCache = null;
 let _currentShelfIdCache = null;
 
-const DEFAULT_SHELVES = [{ id: '1', name: '库存（一）' }];
+// 新装默认: 零库存, 由用户主动创建
+// (不写示例库存"库存（一）", 老用户已存的数据不受影响 — storage 检查在前)
+const DEFAULT_SHELVES = [];
+
+// ========== 库存变化订阅 (用于 AppNavigator 实时显隐 "连接" / "BOM匹配" 标签) ==========
+const _shelfListeners = new Set();
+function _emitShelfChange(list) {
+  for (const cb of _shelfListeners) {
+    try { cb(list); } catch (e) { /* ignore */ }
+  }
+}
+/**
+ * 订阅库存列表变化 (新增/删除/导入后触发)
+ * 首次调用会立即用当前列表触发一次 callback
+ * @param {(shelves: Array) => void} cb
+ * @returns {() => void} 取消订阅
+ */
+export function subscribeShelves(cb) {
+  _shelfListeners.add(cb);
+  // 异步拿当前列表, 触发一次
+  getShelves().then((list) => {
+    if (_shelfListeners.has(cb)) cb(list);
+  }).catch(() => {});
+  return () => { _shelfListeners.delete(cb); };
+}
+
+/**
+ * 外部直接通知 shelves 变了 (用于绕过 ShelfService API 的写入路径, 如 StorageService.importShelfFromFile)
+ * @param {Array} list - 最新的 shelves 数组
+ */
+export function notifyShelfChanged(list) {
+  if (Array.isArray(list)) _emitShelfChange(list);
+}
 
 /**
  * 生成新的库存 ID（基于时间戳 + 随机数, 保证唯一）
@@ -72,6 +104,7 @@ export async function addShelf(name) {
   const next = [...list, newShelf];
   _shelvesCache = next;
   await saveData(SHELVES_KEY, next);
+  _emitShelfChange(next);
   return newShelf;
 }
 
@@ -94,6 +127,7 @@ export async function renameShelf(id, newName) {
   target.name = trimmed;
   _shelvesCache = [...list];
   await saveData(SHELVES_KEY, _shelvesCache);
+  _emitShelfChange(_shelvesCache);
   return { oldName, newName: trimmed };
 }
 
@@ -104,8 +138,10 @@ export async function renameShelf(id, newName) {
  */
 export async function deleteShelf(id) {
   const list = await getShelves();
-  if (list.length <= 1) {
-    throw new Error('至少保留 1 个库存, 不能删除最后一个');
+  // 关键: 允许删到 0 库存 — 新装用户默认就是 0
+  // (之前写死"至少保留 1 个"是历史包袱, 现在是用户主动创建才存在, 删完不报错)
+  if (list.length === 0) {
+    throw new Error('没有可删除的库存');
   }
   const target = list.find((s) => s.id === id);
   if (!target) throw new Error('库存不存在');
@@ -120,6 +156,7 @@ export async function deleteShelf(id) {
   const next = list.filter((s) => s.id !== id);
   _shelvesCache = next;
   await saveData(SHELVES_KEY, next);
+  _emitShelfChange(next);
 
   // 3. 如果删的是当前选中, 切到第一个
   const current = await getCurrentShelfId();

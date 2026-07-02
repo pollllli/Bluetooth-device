@@ -1230,38 +1230,43 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       </View>
 
       {/* 第一行：扫码 + 新建器件（与第二行完全一致, 4 个按钮等高等宽） */}
-      <View style={styles.controlAllButtonsContainer}>
-        <TouchableOpacity
-          style={[styles.controlAllButton, styles.controlAllScanButton]}
-          onPress={() => navigation.navigate('ScanScreen')}
-        >
-          <Text style={styles.controlAllButtonText}>扫码</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.controlAllButton, styles.addButton]}
-          onPress={() =>
-            navigation.navigate('NewDevice', { onSave: loadDevices })
-          }
-        >
-          <Text style={styles.controlAllButtonText}>新建器件</Text>
-        </TouchableOpacity>
-      </View>
+      {/* 关键: 无库存时, 扫码/新建/控制所有 都不可用, 全部隐藏 */}
+      {shelves.length > 0 && (
+        <>
+          <View style={styles.controlAllButtonsContainer}>
+            <TouchableOpacity
+              style={[styles.controlAllButton, styles.controlAllScanButton]}
+              onPress={() => navigation.navigate('ScanScreen')}
+            >
+              <Text style={styles.controlAllButtonText}>扫码</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.controlAllButton, styles.addButton]}
+              onPress={() =>
+                navigation.navigate('NewDevice', { onSave: loadDevices })
+              }
+            >
+              <Text style={styles.controlAllButtonText}>新建器件</Text>
+            </TouchableOpacity>
+          </View>
 
-      {/* 第二行：点亮所有 + 熄灭所有（1:1 等宽,与第一行完全一致） */}
-      <View style={styles.controlAllButtonsContainer}>
-        <TouchableOpacity
-          style={[styles.controlAllButton, styles.controlAllOnButton]}
-          onPress={handleControlAllLightsOn}
-        >
-          <Text style={styles.controlAllButtonText}>点亮所有</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.controlAllButton, styles.controlAllOffButton]}
-          onPress={handleControlAllLightsOff}
-        >
-          <Text style={styles.controlAllButtonText}>熄灭所有</Text>
-        </TouchableOpacity>
-      </View>
+          {/* 第二行：点亮所有 + 熄灭所有（1:1 等宽,与第一行完全一致） */}
+          <View style={styles.controlAllButtonsContainer}>
+            <TouchableOpacity
+              style={[styles.controlAllButton, styles.controlAllOnButton]}
+              onPress={handleControlAllLightsOn}
+            >
+              <Text style={styles.controlAllButtonText}>点亮所有</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.controlAllButton, styles.controlAllOffButton]}
+              onPress={handleControlAllLightsOff}
+            >
+              <Text style={styles.controlAllButtonText}>熄灭所有</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      )}
 
       {/* 设备标签列表 - 必须用 FlatList（参考 settings.tsx）
           原因: react-native-gesture-handler 的 Swipeable (横向 pan 手势)
@@ -1280,6 +1285,28 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color="#1976d2" />
               <Text style={styles.loadingText}>加载器件数据中...</Text>
+            </View>
+          ) : shelves.length === 0 ? (
+            // ========== 关键: 新装用户零库存时的空状态 ==========
+            // 引导用户从"设置 → 库存管理"创建第一个库存
+            <View style={styles.emptyContainer}>
+              <View style={styles.emptyIconContainer}>
+                <Text style={styles.emptyIcon}>📦</Text>
+              </View>
+              <Text style={styles.emptyTitle}>还没有库存</Text>
+              <Text style={styles.emptySubtitle}>
+                请先创建一个库存, 再开始添加器件
+              </Text>
+              <TouchableOpacity
+                style={styles.emptyPrimaryButton}
+                onPress={() => navigation.navigate('ShelfManager')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.emptyPrimaryButtonText}>+ 新建库存</Text>
+              </TouchableOpacity>
+              <Text style={styles.emptyHint}>
+                也可以从微信/QQ 导入他人分享的库存数据
+              </Text>
             </View>
           ) : (
             <View style={styles.emptyContainer}>
@@ -2205,6 +2232,24 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 24,
     lineHeight: 20,
+  },
+  emptyPrimaryButton: {
+    backgroundColor: '#1976d2',
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    borderRadius: 24,
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  emptyPrimaryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  emptyHint: {
+    fontSize: 12,
+    color: '#999',
+    textAlign: 'center',
   },
   loadingContainer: {
     flex: 1,

@@ -1227,9 +1227,9 @@ class StorageService {
       // 4) 决定是覆盖还是新增
       //    加载本地 shelves (绕过 ShelfService 缓存, 走原始 AsyncStorage)
       const localShelvesRaw = await getData('shelves', null);
-      const localShelves = Array.isArray(localShelvesRaw) && localShelvesRaw.length > 0
-        ? localShelvesRaw
-        : [{ id: '1', name: '库存（一）' }];
+      // 关键: 新装用户 shelves 是空数组, 不要再兜底加一个"库存（一）"
+      // (会和用户主动建的"库存（一）"冲突, 也会导致导入后多出一个空库存)
+      const localShelves = Array.isArray(localShelvesRaw) ? localShelvesRaw : [];
 
       const existing = localShelves.find((s) => s && s.name === targetShelfName);
 
@@ -1302,6 +1302,16 @@ class StorageService {
 
       // 6) 写回 shelves (覆盖场景可能改了 bluetoothMac/bluetoothName)
       await saveData('shelves', localShelves);
+
+      // 6.1) 通知订阅者: shelves 变了 (AppNavigator 据此决定是否显示"连接"/"BOM"标签)
+      try {
+        const ShelfService = require('./ShelfService');
+        if (ShelfService && typeof ShelfService.notifyShelfChanged === 'function') {
+          ShelfService.notifyShelfChanged(localShelves);
+        }
+      } catch (emitErr) {
+        // ignore
+      }
 
       // 7) 切换 currentShelfId 为导入的库存 (导入完成, 当前库存跟随)
       await saveData('currentShelfId', targetShelfId);

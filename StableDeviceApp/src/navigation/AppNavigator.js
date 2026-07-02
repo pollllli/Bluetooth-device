@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Image, View, StyleSheet, TouchableOpacity, Text } from 'react-native';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -14,6 +14,7 @@ import ScanScreen from '../screens/ScanScreen';
 import CategoryManagementScreen from '../screens/CategoryManagementScreen';
 import ShelfManagerScreen from '../screens/ShelfManagerScreen';
 import { useUser } from '../context/UserContext';
+import { subscribeShelves } from '../services/ShelfService';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -108,6 +109,9 @@ const MainTabNavigator = () => {
           title: '连接',
           tabBarTestID: 'tab-connection',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bluetooth.png')),
+          // 无库存时, 这个 tab 不可用 — 隐藏掉, 避免用户进一个空白的"请先创建库存"页
+          tabBarStyle: hasShelves ? undefined : { display: 'none' },
+          href: hasShelves ? undefined : null,
         }}
       />
       <Tab.Screen
@@ -116,6 +120,8 @@ const MainTabNavigator = () => {
           title: 'BOM匹配',
           tabBarTestID: 'tab-bom',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bom.png')),
+          tabBarStyle: hasShelves ? undefined : { display: 'none' },
+          href: hasShelves ? undefined : null,
         }}
       >
         {(props) => <BOMScreen {...props} isAdmin={isAdmin} />}

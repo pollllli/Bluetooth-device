@@ -405,7 +405,18 @@ const ConnectionScreen = ({ navigation, route }) => {
 
     try {
       await bluetoothHandler.connectToDevice(deviceId);
-      const device = availableDevices.find((d) => d.id === deviceId);
+      // 注意: 自动连接路径 (导入后 / 切库后) 走的是 connectToBluetoothDevice(autoMac),
+      // 这时 availableDevices 是空的 (还没扫), find 会返回 undefined,
+      // 再访问 device.name 就报 "Cannot read property 'name' of undefined"
+      // 兜底: 用传入的 deviceId + 路由参数 autoConnectName 构造一个 device 对象
+      let device = availableDevices.find((d) => d.id === deviceId);
+      if (!device) {
+        device = {
+          id: deviceId,
+          name: route?.params?.autoConnectName || deviceId,
+        };
+        console.log('[ConnectionScreen.connectToBluetoothDevice] availableDevices 中无此设备, 构造兜底 device:', device);
+      }
       setConnectedDevice(device);
       setIsConnected(true);
       setConnectionStatus(`已连接到: ${device.name}`);
