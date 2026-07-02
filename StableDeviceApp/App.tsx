@@ -471,7 +471,7 @@ export default function App() {
       setIsImporting(false);
       Alert.alert(
         '导入失败',
-        `无法导入文件：${(error as Error).message || '请检查文件格式是否为合法的数据备份'}\n\n请使用本 App 内"我的 → 数据导入"功能重新选择文件。`,
+        (error as Error).message || '文件格式不正确',
         [{ text: '确定' }]
       );
     }
@@ -579,14 +579,14 @@ export default function App() {
       console.error('[BOM-FLOW] 错误堆栈:', e.stack);
       logError('BOM 文件导入失败', e, 'App.handleConfirmBomImport');
 
-      // 针对华为/鸿蒙机型的友好提示
+      // 针对华为/鸿蒙机型的友好提示 (保留 — 实际能解决微信分享 Excel 的常见兼容问题)
       const isHuaweiHint = deviceInfo.isHuawei
-        ? '\n\n【华为/鸿蒙设备提示】\n鸿蒙 4.x 系统对部分 content:// 权限管理较严格。\n如反复失败，可尝试：\n1. 用「QQ」「邮件」等应用先把文件保存到本地，再在 App 内通过"导入 BOM 文件"按钮选择\n2. 升级到最新版鸿蒙系统\n3. 联系开发者并提供设备型号（' + deviceInfo.model + '）'
-        : '\n\n如反复失败，请联系开发者并提供设备型号与系统版本。';
+        ? `\n\n【华为/鸿蒙提示】如反复失败, 可先用 QQ/邮件把文件存到本地, 再用 App 内"导入 BOM"按钮选择。`
+        : '';
 
       Alert.alert(
         '导入失败',
-        `无法导入 BOM 文件：${(e as Error).message || '请检查文件格式是否为合法的 Excel 配单'}${isHuaweiHint}`,
+        `${(e as Error).message || '文件格式不正确'}${isHuaweiHint}`,
         [{ text: '确定' }]
       );
     } finally {
@@ -647,7 +647,7 @@ export default function App() {
         >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>检测到外部数据文件</Text>
+              <Text style={styles.modalTitle}>导入数据</Text>
 
               <View style={styles.fileInfoBox}>
                 <Text style={styles.fileInfoLabel}>文件名</Text>
@@ -656,12 +656,7 @@ export default function App() {
                 </Text>
               </View>
 
-              <Text style={styles.modalTip}>
-                是否将该数据导入到本 App？{'\n'}
-                <Text style={styles.modalTipWarn}>
-                  系统将根据文件名判断: 同名库存会覆盖, 异名库存会新增; 不会影响其他库存。
-                </Text>
-              </Text>
+              <Text style={styles.modalTip}>是否导入？</Text>
 
               <View style={styles.modalButtons}>
                 <TouchableOpacity
@@ -681,7 +676,7 @@ export default function App() {
                   {isImporting ? (
                     <ActivityIndicator color="#fff" size="small" />
                   ) : (
-                    <Text style={styles.confirmButtonText}>确定导入</Text>
+                    <Text style={styles.confirmButtonText}>导入</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -698,7 +693,7 @@ export default function App() {
         >
           <View style={styles.bomModalOverlay}>
             <View style={styles.bomModalContent}>
-              <Text style={styles.modalTitle}>检测到 BOM 配单文件</Text>
+              <Text style={styles.modalTitle}>导入 BOM</Text>
 
               <View style={styles.fileInfoBox}>
                 <Text style={styles.fileInfoLabel}>文件名</Text>
@@ -707,12 +702,7 @@ export default function App() {
                 </Text>
               </View>
 
-              <Text style={styles.modalTip}>
-                是否将该 Excel 文件导入到「BOM 配单」列表？{'\n'}
-                <Text style={styles.modalTipWarn}>
-                  导入后将自动跳转到 BOM 配单界面。
-                </Text>
-              </Text>
+              <Text style={styles.modalTip}>是否导入？</Text>
 
               <View style={styles.modalButtons}>
                 <TouchableOpacity
@@ -732,7 +722,7 @@ export default function App() {
                   {isBomImporting ? (
                     <ActivityIndicator color="#fff" size="small" />
                   ) : (
-                    <Text style={styles.confirmButtonText}>确定导入</Text>
+                    <Text style={styles.confirmButtonText}>导入</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -820,10 +810,6 @@ const styles = StyleSheet.create({
     color: '#666',
     lineHeight: 20,
     marginBottom: 20,
-  },
-  modalTipWarn: {
-    color: '#ef6c00',
-    fontWeight: '500',
   },
   modalButtons: {
     flexDirection: 'row',
