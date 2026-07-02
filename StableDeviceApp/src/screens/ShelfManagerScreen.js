@@ -131,16 +131,11 @@ const ShelfManagerScreen = () => {
     return (
       <View style={[styles.item, isCurrent && styles.itemCurrent]}>
         <View style={styles.itemLeft}>
-          <View style={styles.itemTitleRow}>
-            <Text style={[styles.itemName, isCurrent && styles.itemNameCurrent]}>
-              {item.name}
-            </Text>
-            {isCurrent && (
-              <View style={styles.currentBadge}>
-                <Text style={styles.currentBadgeText}>当前</Text>
-              </View>
-            )}
-          </View>
+          {/* 当前库存: 蓝色边框 + 浅蓝背景 + 蓝色名字 已经够醒目, 不再单独画"当前"胶囊,
+              避免长库存名被压换行 / 占用操作按钮空间 */}
+          <Text style={[styles.itemName, isCurrent && styles.itemNameCurrent]}>
+            {item.name}
+          </Text>
           <Text style={styles.itemMeta}>器件数: {count}</Text>
         </View>
         <View style={styles.itemActions}>
@@ -304,30 +299,14 @@ const styles = StyleSheet.create({
   itemLeft: {
     flex: 1,
   },
-  itemTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
   itemName: {
     fontSize: 16,
     fontWeight: '600',
     color: '#333',
+    marginBottom: 4,
   },
   itemNameCurrent: {
     color: '#1976d2',
-  },
-  currentBadge: {
-    backgroundColor: '#1976d2',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-    marginLeft: 8,
-  },
-  currentBadgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '600',
   },
   itemMeta: {
     fontSize: 12,

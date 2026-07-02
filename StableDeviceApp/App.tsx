@@ -443,13 +443,10 @@ export default function App() {
       setPendingImportName('');
       setIsImporting(false);
 
-      const actionLabel = result.action === 'add' ? '已新增' : '已覆盖';
-      const imageNote = result.restoredImageCount > 0
-        ? `\n已恢复 ${result.restoredImageCount} 张图片${result.failedImageCount > 0 ? ` (${result.failedImageCount} 张失败)` : ''}`
-        : '';
+      const actionLabel = result.action === 'add' ? '已新建' : '已覆盖';
       Alert.alert(
         '导入成功',
-        `文件 "${importedName}" ${actionLabel}为库存"${result.shelfName}",共 ${result.deviceCount} 个器件。${imageNote}\n\n应用将自动切到该库存并尝试连接其绑定的蓝牙。`,
+        `${actionLabel}库存「${result.shelfName}」`,
         [
           {
             text: '确定',
