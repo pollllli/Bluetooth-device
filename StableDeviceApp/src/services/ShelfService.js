@@ -100,7 +100,17 @@ export async function addShelf(name) {
   if (list.some((s) => s.name === trimmed)) {
     throw new Error(`库存名称 "${trimmed}" 已存在`);
   }
-  const newShelf = { id: generateShelfId(), name: trimmed };
+  // 关键: 手动新建的库存**不携带任何蓝牙绑定**。
+  // 蓝牙绑定仅由以下两条路径写入, 其它路径都不应注入:
+  //   1. importShelfFromFile (导入数据时按文件名覆盖/新增, 文件里带了蓝牙就带)
+  //   2. 任意连接成功路径 (ConnectionScreen / handleReconnect / autoConnectBluetooth) 写入"最后一次连接"
+  // 这里显式置 null, 防止任何下游 `shelf.bluetoothMac` 拿到 undefined 而误判
+  const newShelf = {
+    id: generateShelfId(),
+    name: trimmed,
+    bluetoothMac: null,
+    bluetoothName: null,
+  };
   const next = [...list, newShelf];
   _shelvesCache = next;
   await saveData(SHELVES_KEY, next);

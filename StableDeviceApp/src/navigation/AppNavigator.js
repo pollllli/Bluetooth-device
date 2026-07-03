@@ -75,6 +75,17 @@ const MainTabNavigator = () => {
   const isAdmin = user?.isAdmin || false;
   const username = user?.username || 'user';
 
+  // 监听 shelves 变化: 0 库存时隐藏"连接"和"BOM"两个 tab (这俩 tab 无库时无意义)
+  const [hasShelves, setHasShelves] = useState(false);
+  useEffect(() => {
+    let unsubscribe = null;
+    // subscribeShelves 内部会立刻 emit 一次当前列表, 无需手动 getShelves
+    unsubscribe = subscribeShelves((list) => {
+      setHasShelves(Array.isArray(list) && list.length > 0);
+    });
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+  }, []);
+
   return (
     <Tab.Navigator
       screenOptions={{

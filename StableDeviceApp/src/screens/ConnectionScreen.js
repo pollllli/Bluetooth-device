@@ -79,16 +79,41 @@ const ConnectionScreen = ({ navigation, route }) => {
   useEffect(() => {
     const initHandlers = async () => {
       try {
-        // 创建蓝牙处理器实例并初始化
-        const bluetooth = new BluetoothHandler();
-        await bluetooth.initialize();
+        // 关键: 优先复用全局 handler (autoConnectBluetooth / DeviceListScreen.handleReconnect 创建的)
+        // 避免在已有连接的情况下再 new 一个 handler, 否则 BleManager 内部撞同一 device,
+        // 新 handler 的 connectToDevice 会拿到异常返回值, 后续访问 .name 报
+        // "Cannot read property 'name' of undefined" (切库后必现)
+        let bluetooth = null;
+        if (global.deviceConnection && global.deviceConnection.handler
+            && typeof global.deviceConnection.handler.connectToDevice === 'function') {
+          bluetooth = global.deviceConnection.handler;
+          console.log('[ConnectionScreen.init] 复用全局 BluetoothHandler 实例, 当前已连设备:',
+            global.deviceConnection.device && global.deviceConnection.device.name);
+        } else if (global._bluetoothHandlerInstance
+            && typeof global._bluetoothHandlerInstance.connectToDevice === 'function') {
+          bluetooth = global._bluetoothHandlerInstance;
+          console.log('[ConnectionScreen.init] 复用 global._bluetoothHandlerInstance 实例');
+        }
+
+        if (!bluetooth) {
+          // 冷启动 / 真正没有 handler: 走老路, 新建一个
+          console.log('[ConnectionScreen.init] 未发现可用 handler, 新建一个');
+          bluetooth = new BluetoothHandler();
+          await bluetooth.initialize();
+          global._bluetoothHandlerInstance = bluetooth;
+        }
         setBluetoothHandler(bluetooth);
 
         // 检查全局连接状态（处理应用热启动等场景）
         checkGlobalConnectionStatus();
 
         // 尝试自动连接上次连接的设备
-        await tryAutoConnect(bluetooth);
+        // (路由参数 switchShelf + autoConnectMac 已在 useFocusEffect 里处理, 不重复)
+        if (!route?.params?.autoConnectMac) {
+          await tryAutoConnect(bluetooth);
+        } else {
+          console.log('[ConnectionScreen.init] 路由参数有 autoConnectMac, 跳过 storage 路径');
+        }
       } catch (error) {
         console.error('初始化蓝牙处理器失败:', error);
       }
@@ -116,8 +141,10 @@ const ConnectionScreen = ({ navigation, route }) => {
       if (autoConnectTimeoutRef.current) {                  // 清除自动连接超时定时器
         clearTimeout(autoConnectTimeoutRef.current);
       }
-      if (bluetoothHandler) {                              // 断开蓝牙连接
-        bluetoothHandler.disconnect();
+      // 关键: 如果是"本页面新建"的 handler 才断开, 复用的全局 handler 不能断
+      // 否则切回 DeviceListScreen 就断连了
+      if (bluetoothHandler && global._bluetoothHandlerInstance !== bluetoothHandler) {
+        try { bluetoothHandler.disconnect(); } catch (e) { /* ignore */ }
       }
       delete global.onBluetoothDisconnected;                // 删除全局断开回调
     };
@@ -144,10 +171,14 @@ const ConnectionScreen = ({ navigation, route }) => {
 
       // 路径 A: 切库到已绑定的蓝牙, 直接连接
       const autoMac = params?.autoConnectMac;
+      // 关键: setParams 已经把 route.params 清空了, 后续在 connectToBluetoothDevice
+      // 里读 route?.params?.autoConnectName 永远是 undefined。
+      // 必须在这里把名字 capture 下来, 通过入参传过去, 不依赖 route
+      const autoName = params?.autoConnectName || '';
       if (autoMac) {
         const tryAutoConnect = async (attempt = 0) => {
           if (typeof connectToBluetoothDevice === 'function' && bluetoothHandler) {
-            console.log('[ConnectionScreen] 自动连接 MAC=', autoMac, 'attempt=', attempt);
+            console.log('[ConnectionScreen] 自动连接 MAC=', autoMac, 'NAME=', autoName, 'attempt=', attempt);
             try {
               // 关键: 自动连前先确保权限已授予 (App.tsx 启动时已请求过, 这里再补一道兜底)
               // 否则 Android 12+ 会因为没授权直接拒绝连接 → 弹"自动连接失败"
@@ -165,7 +196,7 @@ const ConnectionScreen = ({ navigation, route }) => {
               } catch (permErr) {
                 console.warn('[ConnectionScreen] 自动连接: 请求权限异常, 继续尝试连接', permErr);
               }
-              await connectToBluetoothDevice(autoMac);
+              await connectToBluetoothDevice(autoMac, autoName);
             } catch (err) {
               console.warn('[ConnectionScreen] 自动连接失败:', err);
               // 失败降级到扫描
@@ -397,11 +428,18 @@ const ConnectionScreen = ({ navigation, route }) => {
     }
   };
 
-  const connectToBluetoothDevice = async (deviceId) => {
+  const connectToBluetoothDevice = async (deviceId, nameFromRoute) => {
     if (!bluetoothHandler) {
       Alert.alert('错误', '蓝牙处理器未初始化');
       return;
     }
+
+    // 关键: 自动连接路径 (导入后 / 切库后) 时, useFocusEffect 里 setParams
+    // 已经把 route.params.autoConnectName 清空, 这里读不到。
+    // 调用方应把 name 显式传进来 (nameFromRoute), 兜底还是读 route.
+    const preferredName = (nameFromRoute && nameFromRoute.trim())
+      || (route?.params?.autoConnectName && route.params.autoConnectName.trim())
+      || '';
 
     try {
       await bluetoothHandler.connectToDevice(deviceId);
@@ -413,9 +451,12 @@ const ConnectionScreen = ({ navigation, route }) => {
       if (!device) {
         device = {
           id: deviceId,
-          name: route?.params?.autoConnectName || deviceId,
+          name: preferredName || deviceId,  // 最后兜底用 MAC
         };
         console.log('[ConnectionScreen.connectToBluetoothDevice] availableDevices 中无此设备, 构造兜底 device:', device);
+      } else if (preferredName && !device.name) {
+        // 找到 device 但没名字, 用入参补上
+        device = { ...device, name: preferredName };
       }
       setConnectedDevice(device);
       setIsConnected(true);
@@ -471,7 +512,7 @@ const ConnectionScreen = ({ navigation, route }) => {
       // 心跳验证失败的友好提示
       if (error.message && error.message.includes('心跳')) {
         const message = `连接失败：设备未响应心跳指令
-        
+
 【通信详情】
 发送: ${sendInfo}
 接收: ${receiveInfo}
@@ -486,10 +527,20 @@ const ConnectionScreen = ({ navigation, route }) => {
 - 检查蓝牙模块与MCU的连接
 - 确认MCU已上电并正常工作
 - 检查串口波特率设置（当前检测: ${baudRate || '未知'}）`;
-        
+
         Alert.alert('连接失败', message);
+      } else if (error.message && (error.message.includes('Cannot read property')
+          || error.message.includes('of undefined')
+          || error.message.includes('of null'))) {
+        // 内部错 (多半是 BleManager 状态异常 / 重复连接), 提示用户手动重连
+        // 不要再把 "Cannot read property 'name' of undefined" 这种堆栈文字丢给用户
+        console.warn('[ConnectionScreen.connectToBluetoothDevice] 内部异常, 提示用户重连:', error);
+        Alert.alert('连接失败', '蓝牙连接出现异常, 请稍后重试或到"连接"页手动重连。');
+      } else if (error.message && error.message.includes('已尝试')) {
+        // 多波特率探测循环都失败的友好提示 (BluetoothHandler.connectToDevice 抛的)
+        Alert.alert('连接失败', `${error.message}\n\n【建议】\n• 确认蓝牙模块 UART 波特率 (用 AT 指令配置)\n• 确认 MCU 串口波特率与蓝牙模块一致\n• 常见组合: 9600 + MCU 9600, 或 115200 + MCU 115200`);
       } else {
-        Alert.alert('错误', `连接蓝牙设备失败: ${error.message}`);
+        Alert.alert('连接失败', `连接蓝牙设备失败: ${error.message || '未知错误'}`);
       }
     }
   };

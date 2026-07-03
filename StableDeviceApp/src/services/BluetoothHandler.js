@@ -295,34 +295,40 @@ class BluetoothHandler {
       await this.subscribeToCharacteristic();
       this.addConnectionLog('success', 'Notify特征订阅成功');
 
-      // 自动检测蓝牙模块波特率
-      this.addConnectionLog('info', '开始自动检测波特率');
-      const detectedBaud = await this.autoDetectBaudRate();
-      if (detectedBaud) {
-        this.addConnectionLog('success', `波特率检测成功: ${detectedBaud}`);
-      } else {
-        this.addConnectionLog('warning', '波特率检测失败，使用默认值: 9600');
+      // 自动检测波特率并验证心跳
+      // 关键: 蓝牙模块的 UART 波特率 (与 MCU 通信的速率) 与 BLE 链路无关, 取决于模块自身配置
+      // 用户的 BT 模块可能是 9600 也可能是 115200 (出厂默认 9600, AT+BAUD8 切到 115200)
+      // 这里按候选顺序逐个切换 BT 模块波特率 + 发心跳验证, 第一个验证通过的就是工作波特率
+      const baudCandidates = [9600, 115200];
+      this.addConnectionLog('info', `开始自动检测波特率, 候选: ${baudCandidates.join(', ')}`);
+      let workingBaud = null;
+      for (const baud of baudCandidates) {
+        this.addConnectionLog('info', `【波特率 ${baud}】发送 AT+BAUD 切换`);
+        await this.sendBaudRateCommand(baud);
+        // 等 BT 模块切完波特率 (内部需要时间, 留 300ms)
+        await new Promise((r) => setTimeout(r, 300));
+        this.currentBaudRate = baud;
+
+        this.addConnectionLog('info', `【波特率 ${baud}】发送心跳验证`);
+        const ok = await this.verifyDeviceHeartbeat();
+        if (ok) {
+          workingBaud = baud;
+          this.addConnectionLog('success', `心跳验证通过, 工作波特率锁定: ${baud}`);
+          break;
+        }
+        this.addConnectionLog('warning', `【波特率 ${baud}】心跳无响应, 尝试下一个`);
       }
 
-      // 验证 MCU 响应：发送心跳指令
-      // 协议：APP 发送 55 AA 00 02 00 01 CRC，MCU 响应 55 AA 80 02 00 01 CRC
-      this.addConnectionLog('info', '开始验证MCU响应：发送心跳指令');
-      
-      const heartbeatVerified = await this.verifyDeviceHeartbeat();
-      
-      if (heartbeatVerified) {
-        this.addConnectionLog('success', '心跳验证通过，确认为目标设备');
-      } else {
-        this.addConnectionLog('error', '心跳验证失败，设备未响应心跳指令');
-      }
-      
-      if (!heartbeatVerified) {
-        console.error('✗ MCU 未响应心跳指令，判定为非目标设备');
+      if (workingBaud == null) {
+        console.error(`✗ 候选波特率 [${baudCandidates.join(', ')}] 全部验证失败, MCU 未响应心跳`);
         // 主动断开连接
         await this.disconnect();
-        throw new Error('设备未响应心跳指令，连接已断开（不是我们的设备）');
+        throw new Error(
+          `设备未响应心跳指令（已尝试 ${baudCandidates.join('/')}, 连接已断开）。` +
+          `请检查蓝牙模块 UART 波特率是否与 MCU 一致。`
+        );
       }
-      console.log('✓ 心跳验证通过，确认为目标设备');
+      console.log(`✓ 心跳验证通过, 工作波特率: ${workingBaud}`);
 
       // 保存连接的设备信息，以便下次自动连接
       await StorageService.saveLastConnectedDevice({

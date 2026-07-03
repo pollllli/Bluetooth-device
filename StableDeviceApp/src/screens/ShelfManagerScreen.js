@@ -128,6 +128,7 @@ const ShelfManagerScreen = () => {
   const renderItem = ({ item }) => {
     const isCurrent = item.id === currentShelfId;
     const count = deviceCounts[item.id] || 0;
+    const hasBluetooth = !!(item.bluetoothMac && String(item.bluetoothMac).trim());
     return (
       <View style={[styles.item, isCurrent && styles.itemCurrent]}>
         <View style={styles.itemLeft}>
@@ -136,7 +137,25 @@ const ShelfManagerScreen = () => {
           <Text style={[styles.itemName, isCurrent && styles.itemNameCurrent]}>
             {item.name}
           </Text>
-          <Text style={styles.itemMeta}>器件数: {count}</Text>
+          <View style={styles.itemMetaRow}>
+            <Text style={styles.itemMeta}>器件数: {count}</Text>
+            <View style={[
+              styles.bluetoothBadge,
+              hasBluetooth ? styles.bluetoothBadgeBound : styles.bluetoothBadgeUnbound,
+            ]}>
+              <Feather
+                name={hasBluetooth ? 'bluetooth' : 'bluetooth-off'}
+                size={12}
+                color={hasBluetooth ? '#1976d2' : '#999'}
+              />
+              <Text style={[
+                styles.bluetoothBadgeText,
+                hasBluetooth ? styles.bluetoothBadgeTextBound : styles.bluetoothBadgeTextUnbound,
+              ]}>
+                {hasBluetooth ? `已绑定: ${item.bluetoothName || item.bluetoothMac}` : '未绑定蓝牙'}
+              </Text>
+            </View>
+          </View>
         </View>
         <View style={styles.itemActions}>
           <TouchableOpacity
@@ -310,6 +329,39 @@ const styles = StyleSheet.create({
   },
   itemMeta: {
     fontSize: 12,
+    color: '#999',
+    marginRight: 8,
+  },
+  itemMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+    flexWrap: 'wrap',
+  },
+  bluetoothBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  bluetoothBadgeBound: {
+    backgroundColor: '#e3f2fd',
+    borderColor: '#90caf9',
+  },
+  bluetoothBadgeUnbound: {
+    backgroundColor: '#f5f5f5',
+    borderColor: '#ddd',
+  },
+  bluetoothBadgeText: {
+    fontSize: 11,
+    marginLeft: 3,
+  },
+  bluetoothBadgeTextBound: {
+    color: '#1976d2',
+  },
+  bluetoothBadgeTextUnbound: {
     color: '#999',
   },
   itemActions: {
