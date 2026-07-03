@@ -33,6 +33,7 @@ import {
   SafeAreaView,
   Modal,
   Image,
+  StatusBar,
 } from 'react-native';
 // ⚠️ FlatList 必须用 react-native-gesture-handler 的!
 // 这是 Android 上 Swipeable 工作的关键: gesture-handler 的 FlatList
@@ -628,6 +629,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   const [showShelfSheet, setShowShelfSheet] = useState(false);
   const [shelfSheetList, setShelfSheetList] = useState([]); // [{id, name, deviceCount}]
 
+  // ========== 器件图片点击放大 (与 ImageUploadField 同 Modal 模式) ==========
+  // null = 关闭; 非空 = 当前放大的图片 uri
+  const [zoomedImageUri, setZoomedImageUri] = useState(null);
+
   const handleOpenShelfSheet = useCallback(async () => {
     try {
       const [list, devices] = await Promise.all([
@@ -672,59 +677,51 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           loadDevices();
         };
 
-        // 路径 1: 目标库存已绑定蓝牙 + 切过去会断开当前 -> 弹窗问 "是否自动连"
-        if (targetBluetooth && (isCurrentlyConnected || true)) {
-          // 提示文案根据当前连接情况调整
-          const currentLabel = isCurrentlyConnected
-            ? `\n当前连接的蓝牙将被断开。`
-            : '';
+        // 路径 1: 目标库存已绑定蓝牙 → 默认自动连, 失败才弹 [取消 / 手动选择] 弹窗
+        if (targetBluetooth) {
           const label = targetBluetooth.name || targetBluetooth.mac;
 
-          const tryAutoConnect = async () => {
-            await doSwitch();
-            // 跳到连接页并传 autoConnectMac, 让连接页直接连接而不弹扫描
-            navigation.navigate('Connection', {
-              action: 'switchShelf',
-              targetShelfId: shelf.id,
-              autoConnectMac: targetBluetooth.mac,
-              autoConnectName: targetBluetooth.name,
-            });
-          };
+          // 1) 如果当前还连着别的蓝牙, 先静默断开 + 清全局, 避免连接冲突
+          //    (用户不再被"当前蓝牙将被断开"打扰, 一切自动)
+          if (isCurrentlyConnected && handler && typeof handler.disconnect === 'function') {
+            try {
+              await handler.disconnect();
+              if (global.deviceConnection) delete global.deviceConnection;
+            } catch (e) { /* 忽略, 继续 */ }
+          }
 
-          Alert.alert(
-            '切换库存',
-            `切换到 "${shelf.name}", 该库存已绑定蓝牙 "${label}"。${currentLabel}\n\n是否自动连接该蓝牙？`,
-            [
-              { text: '取消', style: 'cancel' },
-              {
-                text: '手动选择',
-                onPress: async () => {
-                  // 手动选: 切库 + 断开(如有) + 跳扫描
-                  try {
-                    if (isCurrentlyConnected && handler && typeof handler.disconnect === 'function') {
-                      await handler.disconnect();
-                      // 关键: 同步清掉 global.deviceConnection, 否则 ConnectionScreen 进来后
-                      // 会显示 stale "已连接" (上一次连接的 MAC), 用户以为新库存自动连了
-                      if (global.deviceConnection) delete global.deviceConnection;
-                    }
-                  } catch (e) { /* 忽略 */ }
-                  await doSwitch();
-                  navigation.navigate('Connection', {
-                    action: 'switchShelf',
-                    targetShelfId: shelf.id,
-                    autoScan: true,
-                    autoScanAt: Date.now(),
-                  });
+          // 2) 切库 (currentShelfId + 重新加载器件)
+          await doSwitch();
+
+          // 3) 后台自动连绑定的蓝牙 (不弹 Alert, 静默 Toast / console)
+          const result = await autoConnectBluetooth(targetBluetooth.mac, targetBluetooth.name);
+
+          // 4) 自动连失败 → 给用户两个选择: 取消 / 手动扫描
+          //    注意: shelf 已经切到目标, "取消" 仅是放弃连接, 不回退 shelf
+          if (!result || !result.ok) {
+            Alert.alert(
+              '蓝牙不在范围',
+              `无法自动连接蓝牙 "${label}", 请手动扫描或取消。`,
+              [
+                {
+                  text: '取消',
+                  style: 'cancel',
+                  // 什么都不做, 库存已切但蓝牙未连, 顶部胶囊显示"未连接"
                 },
-              },
-              {
-                text: '自动连接',
-                onPress: () => {
-                  tryAutoConnect().catch((err) => Alert.alert('切库失败', err.message || '请重试'));
+                {
+                  text: '手动选择',
+                  onPress: () => {
+                    navigation.navigate('Connection', {
+                      action: 'switchShelf',
+                      targetShelfId: shelf.id,
+                      autoScan: true,
+                      autoScanAt: Date.now(),
+                    });
+                  },
                 },
-              },
-            ]
-          );
+              ]
+            );
+          }
           return;
         }
 
@@ -1017,16 +1014,23 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
             onPress={handlePress}
             delayPressIn={150}
           >
-            {/* 左侧方图（方角）：用户上传图 / 默认占位 */}
+            {/* 左侧方图（方角）：用户上传图 / 默认占位
+                点击图片直接全屏放大查看, 不必进入编辑页 */}
             <View style={styles.deviceTagImageWrap}>
               {item.image ? (
-                <Image
-                  source={{ uri: item.image }}
-                  style={styles.deviceTagImage}
-                  resizeMode="cover"
-                />
+                <Pressable
+                  style={styles.deviceTagImagePressable}
+                  onPress={() => setZoomedImageUri(item.image)}
+                  hitSlop={4}
+                >
+                  <Image
+                    source={{ uri: item.image }}
+                    style={styles.deviceTagImage}
+                    resizeMode="cover"
+                  />
+                </Pressable>
               ) : (
-                // 默认占位图：assets/device-default.png
+                // 默认占位图: assets/device-default.png
                 // （用户已放入, 这里用 require 直接打包进 APK）
                 <Image
                   source={require('../../assets/device-default.png')}
@@ -1592,6 +1596,38 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           </View>
         </View>
       )}
+
+      {/* ========== 器件图片全屏放大 Modal ==========
+          与 ImageUploadField 同模式: 单击背景/图片/关闭按钮都能退出 */}
+      <Modal
+        visible={!!zoomedImageUri}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setZoomedImageUri(null)}
+        statusBarTranslucent
+      >
+        <StatusBar barStyle="light-content" backgroundColor="#000" />
+        <Pressable
+          style={styles.imageZoomBackdrop}
+          onPress={() => setZoomedImageUri(null)}
+        >
+          {zoomedImageUri ? (
+            <Image
+              source={{ uri: zoomedImageUri }}
+              style={styles.imageZoomImage}
+              resizeMode="contain"
+            />
+          ) : null}
+          <TouchableOpacity
+            style={styles.imageZoomClose}
+            onPress={() => setZoomedImageUri(null)}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Text style={styles.imageZoomCloseText}>×</Text>
+          </TouchableOpacity>
+          <Text style={styles.imageZoomHint}>点击任意位置返回</Text>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -2077,14 +2113,18 @@ const styles = StyleSheet.create({
     flex: 1,
     // 微信风格: item 直接连接屏幕左右边缘, 不要 padding
   },
-  // FlatList contentContainerStyle: 第一个器件标签与上方按钮加大间距
+  // FlatList contentContainerStyle
+  // 关键: 底部预留 220px, 约等于 2-3 个器件标签 (含 8px 分隔) 高度的滚动空间,
+  // 这样滑到最后一个器件时还能继续往上滑, 用户能看到"已到底"的呼吸感,
+  // 而不会"卡死"在最后一条
   tagsList: {
     paddingTop: 12,
+    paddingHorizontal: 8,   // 标签左右也留点空, 视觉更轻
+    paddingBottom: 220,
   },
-  // 微信风格: item 之间用灰色横线分隔
+  // 标签之间留白: 8px 浅灰分隔, 视觉上「隔开」而不是「切线」
   tagDivider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: '#e0e0e0',
+    height: 8,
   },
   deviceTag: {
     backgroundColor: 'white',
@@ -2112,9 +2152,47 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  // 图片点击放大区: 充满 70x70 wrap, 没有可见样式, 仅做点击事件透传
+  deviceTagImagePressable: {
+    width: '100%',
+    height: '100%',
+  },
   deviceTagImage: {
     width: '100%',
     height: '100%',
+  },
+  // ========== 器件图片全屏放大 Modal 样式 (与 ImageUploadField 保持一致) ==========
+  imageZoomBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageZoomImage: {
+    width: '95%',
+    height: '85%',
+  },
+  imageZoomClose: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageZoomCloseText: {
+    color: '#fff',
+    fontSize: 22,
+    lineHeight: 24,
+  },
+  imageZoomHint: {
+    position: 'absolute',
+    bottom: 36,
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 13,
   },
   // 默认占位（用户未上传图片时显示）
   deviceTagImagePlaceholder: {

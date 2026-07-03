@@ -260,6 +260,64 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   };
 
   /**
+   * 清空当前 BOM 匹配列表
+   * 流程: 1) 关掉所有当前亮灯的器件 → 2) 清空 components / filteredComponents / litDeviceIds / 搜索词
+   * 二次确认 (Alert) 防止误触
+   */
+  const handleClearBOM = () => {
+    if (components.length === 0 && litDeviceIds.length === 0) {
+      // 列表本身是空的, 没必要确认
+      return;
+    }
+    Alert.alert(
+      '清空 BOM 匹配',
+      `确定要清空当前 BOM 列表（共 ${components.length} 条）吗？\n\n所有已点亮的灯也会熄灭。`,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '清空',
+          style: 'destructive',
+          onPress: async () => {
+            // 1) 先熄灭所有当前亮灯的器件 (按真实硬件位置发 lightOff)
+            try {
+              if (global.deviceConnection?.handler && litDeviceIds.length > 0) {
+                const handler = global.deviceConnection.handler;
+                for (const deviceId of litDeviceIds) {
+                  const dev = devices.find((d) => d.id === deviceId);
+                  if (!dev) continue;
+                  // 沿用 BOMScreen 内部既定的位置计算逻辑 (与 handleComponentPress 一致)
+                  let hardwarePosition;
+                  if (dev.location != null && dev.location !== '') {
+                    const parsedLocation = parseInt(dev.location, 10);
+                    hardwarePosition = isNaN(parsedLocation)
+                      ? (devices.findIndex((d) => d.id === dev.id) + 1)
+                      : parsedLocation;
+                  } else {
+                    hardwarePosition = devices.findIndex((d) => d.id === dev.id) + 1;
+                  }
+                  try {
+                    await handler.sendCommand({ type: 'lightOff', lightId: hardwarePosition });
+                  } catch (e) { /* 忽略, 继续 */ }
+                  // 间隔 300ms, 避免蓝牙队列阻塞
+                  await new Promise((r) => setTimeout(r, 300));
+                }
+              }
+            } catch (e) {
+              console.warn('[BOM 清空] 熄灭灯光异常:', e);
+            }
+            // 2) 清空 state
+            setComponents([]);
+            setFilteredComponents([]);
+            setLitDeviceIds([]);
+            setSearchQuery('');
+            console.log('[BOM] 已清空 BOM 匹配列表');
+          },
+        },
+      ]
+    );
+  };
+
+  /**
    * 处理 BOM Excel 文件的核心流程（读取 → 解析 → 写入器件列表）
    * 既被本地文件选择器使用，也被外部应用（微信等）分享的 BOM 文件使用
    * @param {string} localUri - 缓存目录中的本地文件路径（file:// 开头或裸路径均可）
@@ -948,19 +1006,31 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
       <ScrollView style={styles.content}>
         <View style={styles.componentsList}>
-          {/* 标题栏：器件列表 + 导入按钮（右上角） */}
+          {/* 标题栏：器件列表 + 右上角清空 + 导入按钮 */}
           <View style={styles.listHeader}>
             <Text style={styles.label}>器件列表</Text>
-            <TouchableOpacity
-              style={styles.importButtonTop}
-              onPress={handleImportBOM}
-              disabled={isImporting}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.importButtonText}>
-                {isImporting ? '导入中...' : '导入'}
-              </Text>
-            </TouchableOpacity>
+            <View style={styles.headerButtons}>
+              {/* 蓝色「清空」按钮: 清空当前 BOM 匹配列表 + 熄灭已亮灯 */}
+              <TouchableOpacity
+                style={styles.clearButtonTop}
+                onPress={handleClearBOM}
+                disabled={isImporting}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.clearButtonText}>清空</Text>
+              </TouchableOpacity>
+              {/* 橘色「导入」按钮: 选择 / 接收 BOM Excel 文件 */}
+              <TouchableOpacity
+                style={styles.importButtonTop}
+                onPress={handleImportBOM}
+                disabled={isImporting}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.importButtonText}>
+                  {isImporting ? '导入中...' : '导入'}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {/* 搜索输入框 */}
@@ -1264,12 +1334,33 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
-  // 标题栏：器件列表 + 右上角「导入」按钮
+  // 标题栏：器件列表 + 右上角「清空」「导入」按钮
   listHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
+  },
+  // 标题栏右侧两个按钮的容器
+  headerButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  // 标题栏右侧的「清空」按钮 (蓝色, 紧凑尺寸, 在「导入」左侧)
+  clearButtonTop: {
+    backgroundColor: '#2196f3',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 6,
+    minWidth: 50,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  clearButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   // 标题栏右侧的「导入」按钮（橘色，紧凑尺寸）
   importButtonTop: {

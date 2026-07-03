@@ -297,10 +297,9 @@ class BluetoothHandler {
 
       // 自动检测波特率并验证心跳
       // 关键: 蓝牙模块的 UART 波特率 (与 MCU 通信的速率) 与 BLE 链路无关, 取决于模块自身配置
-      // 用户的 BT 模块可能是 9600 也可能是 115200 (出厂默认 9600, AT+BAUD8 切到 115200)
-      // 这里按候选顺序逐个切换 BT 模块波特率 + 发心跳验证, 第一个验证通过的就是工作波特率
-      const baudCandidates = [9600, 115200];
-      this.addConnectionLog('info', `开始自动检测波特率, 候选: ${baudCandidates.join(', ')}`);
+      // 用户已确认: 只需要 9600 (CH9140 出厂默认), 不再支持 115200
+      const baudCandidates = [9600];
+      this.addConnectionLog('info', `波特率锁定 9600, 开始心跳验证`);
       let workingBaud = null;
       for (const baud of baudCandidates) {
         this.addConnectionLog('info', `【波特率 ${baud}】发送 AT+BAUD 切换`);
@@ -320,12 +319,12 @@ class BluetoothHandler {
       }
 
       if (workingBaud == null) {
-        console.error(`✗ 候选波特率 [${baudCandidates.join(', ')}] 全部验证失败, MCU 未响应心跳`);
+        console.error(`✗ 波特率 9600 验证失败, MCU 未响应心跳`);
         // 主动断开连接
         await this.disconnect();
         throw new Error(
-          `设备未响应心跳指令（已尝试 ${baudCandidates.join('/')}, 连接已断开）。` +
-          `请检查蓝牙模块 UART 波特率是否与 MCU 一致。`
+          `设备未响应心跳指令（波特率 9600, 连接已断开）。` +
+          `请检查蓝牙模块 UART 波特率是否设置为 9600 并与 MCU 一致。`
         );
       }
       console.log(`✓ 心跳验证通过, 工作波特率: ${workingBaud}`);

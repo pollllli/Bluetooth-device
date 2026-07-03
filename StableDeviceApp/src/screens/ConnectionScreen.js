@@ -466,6 +466,9 @@ const ConnectionScreen = ({ navigation, route }) => {
       || '';
 
     try {
+      // 关键: 立刻把状态切到「连接中...」, 用户在等几秒握手时能看到实时进度,
+      // 不会再卡在「未连接」以为卡死
+      setConnectionStatus('连接中...');
       await bluetoothHandler.connectToDevice(deviceId);
       // 注意: 自动连接路径 (导入后 / 切库后) 走的是 connectToBluetoothDevice(autoMac),
       // 这时 availableDevices 是空的 (还没扫), find 会返回 undefined,
@@ -510,6 +513,8 @@ const ConnectionScreen = ({ navigation, route }) => {
       }
     } catch (error) {
       console.error('连接蓝牙设备失败:', error);
+      // 连接失败: 状态从「连接中...」回退到「未连接」, 不让用户以为还在握手
+      setConnectionStatus('未连接');
       // 获取连接日志
       const logs = bluetoothHandler ? bluetoothHandler.getConnectionLog() : [];
       

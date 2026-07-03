@@ -86,17 +86,26 @@ const MainTabNavigator = () => {
     return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
   }, []);
 
+  // 关键: 共享的 tabBarStyle, 所有 tab 必须用同一个, 高度才不会切 tab 时跳变
+  // 之前 Connection/BOM 用 `tabBarStyle: hasShelves ? undefined : { display: 'none' }`,
+  // undefined 在 React Navigation v5 里被当「清空样式」, 不会回退到 screenOptions.tabBarStyle,
+  // 导致这俩 tab 用了平台默认高度 49 (系统默认). 库存/设置 没踩这个坑是因为它们没设 tabBarStyle
+  const baseTabBarStyle = {
+    backgroundColor: '#f5f5f5',
+    borderTopWidth: 1,
+    borderTopColor: '#ddd',
+    height: 60,
+    paddingBottom: 4,
+  };
+  // 无库存时: 用同一个基础样式, 加上 display: 'none' (不参与切换高度, 反正也不显示)
+  const hiddenTabBarStyle = { ...baseTabBarStyle, display: 'none' };
+
   return (
     <Tab.Navigator
       screenOptions={{
         tabBarActiveTintColor: '#007AFF',
         tabBarInactiveTintColor: '#999',
-        tabBarStyle: {
-          backgroundColor: '#f5f5f5',
-          borderTopWidth: 1,
-          borderTopColor: '#ddd',
-          height: 60,
-        },
+        tabBarStyle: baseTabBarStyle,
         tabBarLabelStyle: {
           fontSize: 14,
         },
@@ -121,7 +130,7 @@ const MainTabNavigator = () => {
           tabBarTestID: 'tab-connection',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bluetooth.png')),
           // 无库存时, 这个 tab 不可用 — 隐藏掉, 避免用户进一个空白的"请先创建库存"页
-          tabBarStyle: hasShelves ? undefined : { display: 'none' },
+          tabBarStyle: hasShelves ? baseTabBarStyle : hiddenTabBarStyle,
           href: hasShelves ? undefined : null,
         }}
       />
@@ -131,7 +140,7 @@ const MainTabNavigator = () => {
           title: 'BOM匹配',
           tabBarTestID: 'tab-bom',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bom.png')),
-          tabBarStyle: hasShelves ? undefined : { display: 'none' },
+          tabBarStyle: hasShelves ? baseTabBarStyle : hiddenTabBarStyle,
           href: hasShelves ? undefined : null,
         }}
       >
