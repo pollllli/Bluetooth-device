@@ -703,6 +703,9 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
                   try {
                     if (isCurrentlyConnected && handler && typeof handler.disconnect === 'function') {
                       await handler.disconnect();
+                      // 关键: 同步清掉 global.deviceConnection, 否则 ConnectionScreen 进来后
+                      // 会显示 stale "已连接" (上一次连接的 MAC), 用户以为新库存自动连了
+                      if (global.deviceConnection) delete global.deviceConnection;
                     }
                   } catch (e) { /* 忽略 */ }
                   await doSwitch();
@@ -730,9 +733,18 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           try {
             if (isCurrentlyConnected && handler && typeof handler.disconnect === 'function') {
               await handler.disconnect();
+              // 关键: handler.disconnect() 只是断开 BLE 链路, 不会清 global.deviceConnection.
+              // 如果不清, ConnectionScreen 进来后 read global 看到 stale "已连接" -> 误以为新库存自动连上了
+              // 同时 DeviceListScreen 的连接胶囊也仍是 "已连接" -> 视觉欺骗
+              if (global.deviceConnection) {
+                delete global.deviceConnection;
+              }
+              console.log('[切库-路径2] 已断开并清空全局连接状态, 切到未绑定蓝牙的库存', shelf.name);
             }
           } catch (e) {
             console.warn('断开蓝牙失败, 继续切库:', e);
+            // 仍然尝试清全局, 避免 stale state
+            if (global.deviceConnection) delete global.deviceConnection;
           }
           await doSwitch();
           navigation.navigate('Connection', {

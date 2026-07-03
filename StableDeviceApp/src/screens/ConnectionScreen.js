@@ -107,12 +107,36 @@ const ConnectionScreen = ({ navigation, route }) => {
         // 检查全局连接状态（处理应用热启动等场景）
         checkGlobalConnectionStatus();
 
-        // 尝试自动连接上次连接的设备
-        // (路由参数 switchShelf + autoConnectMac 已在 useFocusEffect 里处理, 不重复)
-        if (!route?.params?.autoConnectMac) {
-          await tryAutoConnect(bluetooth);
+        // 决定要不要自动连:
+        // 1. 路由参数带 autoConnectMac -> 显式指定, useFocusEffect 会连, 这边啥也不做
+        // 2. 路由参数带 autoScan (切库后跳到连接页 / 切库手动选) -> 永远不自动连, 让 useFocusEffect 走扫描
+        // 3. 无路由参数 (app 启动 / tab bar 直接进连接页) -> 看**当前库存**是否绑了蓝牙:
+        //    - 绑了 -> 重连 (tryAutoConnect), 跟"切到当前库存"语义一致
+        //    - 没绑 -> 啥也不做, 让用户进到页面后扫
+        if (route?.params?.autoConnectMac) {
+          console.log('[ConnectionScreen.init] 路由参数带 autoConnectMac, 走 useFocusEffect 处理');
+        } else if (route?.params?.autoScan) {
+          // 不论目标库存绑没绑蓝牙, 都不自动连
+          // (切库后 / 切库手动选: 用户已经看到"要切到 X"的弹窗, 连不连应当由 useFocusEffect 按 params 决定)
+          console.log('[ConnectionScreen.init] 路由参数带 autoScan, **不自动连**, 仅供扫描');
         } else {
-          console.log('[ConnectionScreen.init] 路由参数有 autoConnectMac, 跳过 storage 路径');
+          // 没有任何路由参数: 走"按当前库存绑定"判断
+          try {
+            const currentShelfId = await ShelfService.getCurrentShelfId();
+            const currentShelfBluetooth = currentShelfId
+              ? await ShelfService.getShelfBluetooth(currentShelfId)
+              : null;
+            if (currentShelfBluetooth && currentShelfBluetooth.mac) {
+              console.log('[ConnectionScreen.init] 当前库存', currentShelfId, '已绑', currentShelfBluetooth.mac, ', 尝试自动重连');
+              await tryAutoConnect(bluetooth);
+            } else {
+              console.log('[ConnectionScreen.init] 当前库存未绑蓝牙, **不自动连**');
+              setCanManualConnect(true);
+            }
+          } catch (shelfErr) {
+            console.warn('[ConnectionScreen.init] 查当前库存蓝牙失败, 降级为扫描:', shelfErr);
+            setCanManualConnect(true);
+          }
         }
       } catch (error) {
         console.error('初始化蓝牙处理器失败:', error);
