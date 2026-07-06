@@ -140,6 +140,40 @@ class StorageService {
         return device;
       });
 
+      // 清理历史遗留的 ImagePicker 临时 cache 路径
+      // 旧版本 addDevice 把 asset.uri 直接存进 AsyncStorage, 文件在 cache/ImagePicker/ 下,
+      // 一旦 cache 被系统清掉, 这个 device.image 就成"鬼影", 后续 export 读就 ENOENT
+      // 这里一次性把失效的临时路径清成空串, 不再尝试重新复制 (源文件已经没了)
+      if (Array.isArray(devices) && devices.length > 0) {
+        let cleanedImageCount = 0;
+        const cleaned = await Promise.all(
+          devices.map(async (d) => {
+            if (!d || !d.image || typeof d.image !== 'string') return d;
+            if (!d.image.startsWith('file://')) return d; // content:// / http:// 不动
+            if (d.image.startsWith(IMAGES_DIR)) return d; // 已经是永久沙盒的, 不动
+            // 临时 cache 路径: 检查文件是否还存在
+            try {
+              const info = await FileSystem.getInfoAsync(d.image);
+              if (!info || !info.exists) {
+                cleanedImageCount++;
+                console.warn(`[getDevices] 清理失效图片路径: ${d.image}`);
+                return { ...d, image: '' };
+              }
+            } catch (e) {
+              // getInfoAsync 失败: 保守地清掉, 避免后续报错
+              cleanedImageCount++;
+              return { ...d, image: '' };
+            }
+            return d;
+          })
+        );
+        if (cleanedImageCount > 0) {
+          devices = cleaned;
+          needsSave = true;
+          console.log(`[getDevices] 共清理 ${cleanedImageCount} 个失效的图片临时路径`);
+        }
+      }
+
       // 如果修复了数据，保存修复后的数据
       if (needsSave) {
         await saveData('devices', devices);
@@ -208,6 +242,12 @@ class StorageService {
         updatedAt: new Date().toISOString(),
       };
 
+      // 【图片持久化】把 ImagePicker 临时 cache 路径复制到永久沙盒
+      // 修复: 之前直接存 asset.uri, 临时文件被系统清掉后 export 读就 ENOENT
+      if (newDevice.image) {
+        newDevice.image = await this.#persistImageToSandbox(newDevice.image);
+      }
+
       // 【自动归类】若器件没有 category，或 category 不在分类树里，尝试智能匹配
       // 让用户能通过左上角"全部器件 ▼"下拉里的子类目准确筛选到
       try {
@@ -264,6 +304,10 @@ class StorageService {
 
       const index = devices.findIndex((d) => d.id === updatedDevice.id);
       if (index !== -1) {
+        // 【图片持久化】编辑器件时如果换了图, 把新图也复制到永久沙盒
+        if (updatedDevice.image && updatedDevice.image !== devices[index].image) {
+          updatedDevice.image = await this.#persistImageToSandbox(updatedDevice.image);
+        }
         const updated = {
           ...updatedDevice,
           updatedAt: new Date().toISOString(),
@@ -856,13 +900,33 @@ class StorageService {
   static async #readImageAsBase64(uri) {
     if (!uri || typeof uri !== 'string') return null;
     try {
+      // 防御性探针: 先用 getInfoAsync 确认文件存在
+      // 修复"上次运行出现错误"弹窗: ImagePicker 选完图如果 app 被强杀 / 后台清掉,
+      // 存的还是 cache 临时路径, 下次启动读就直接 ENOENT。
+      // 提前跳过, 不走 readAsStringAsync, 也不进 catch (避免 console.error 触发 LogBox 持久化)
+      if (uri.startsWith('file://')) {
+        try {
+          const info = await FileSystem.getInfoAsync(uri);
+          if (!info || !info.exists) {
+            // 静默返回 null, 仅 warn (warn 不会被 LogBox 弹窗)
+            console.warn(`[readImageAsBase64] 图片不存在, 已跳过: ${uri}`);
+            return null;
+          }
+        } catch (infoErr) {
+          // getInfoAsync 自身失败不阻塞, 让 readAsStringAsync 继续尝试 (可能 content:// 走 ContentResolver)
+        }
+      }
       // FileSystem.readAsStringAsync 支持 file:// 和 content://
       // 鸿蒙/微信分享的 content URI 也能用 (走 ContentResolver)
       return await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
     } catch (err) {
-      logError('读图片转 base64 失败', err, 'StorageService.#readImageAsBase64');
+      // 用 warn 而不是 error:
+      // - 缺失的临时 cache 图是**预期的可恢复**情况 (用户上次强退 / 切库 / 系统清缓存)
+      // - console.error 会被 RN LogBox 持久化, 下次启动弹"上次运行出现错误"骚扰用户
+      // - console.warn 不被 LogBox 记录, 仅 adb logcat 可见
+      console.warn(`[readImageAsBase64] 读图片失败 (已跳过): ${err?.message || err}`);
       return null;
     }
   }
@@ -889,6 +953,131 @@ class StorageService {
     } catch (err) {
       logError('写 base64 到沙盒失败', err, 'StorageService.#writeBase64AsImage');
       return null;
+    }
+  }
+
+  /**
+   * 把图片文件从临时位置 (ImagePicker cache) 复制到 app 永久沙盒 images/ 目录
+   *
+   * 设计目的 (修复"上次运行出现错误"弹窗):
+   * - expo-image-picker 默认把选中的图放到 cache/ImagePicker/xxx.jpeg (临时路径)
+   * - 临时路径随时可能被 Android 系统清掉 (杀进程 / 低存储清理 / 切到后台太久)
+   * - addDevice / updateDevice 直接把临时 URI 存进 AsyncStorage,
+   *   后续 export 读就 ENOENT, console.error 被 App.tsx 拦截器持久化 → 弹窗骚扰用户
+   *
+   * 行为:
+   * - 入参 URI 已经在永久沙盒 (IMAGES_DIR) 内 → 不动, 直接返回原 URI
+   * - 是 cache 路径 / 其他临时位置 → 复制到永久沙盒, 返回新 URI
+   * - 复制失败 (源文件已不在) → 返回原 URI, 让上层继续 (export 时会优雅降级)
+   *
+   * @param {string} uri - 源图片 URI
+   * @returns {Promise<string>} 永久沙盒 URI, 失败回退到原 URI
+   */
+  static async #persistImageToSandbox(uri) {
+    if (!uri || typeof uri !== 'string') return uri;
+    // 已经在永久沙盒内: 不动
+    if (uri.startsWith(IMAGES_DIR)) return uri;
+    // 非 file:// URI (content:// / ph:// / http://) : 不处理, 让上层走 ContentResolver
+    if (!uri.startsWith('file://')) return uri;
+    try {
+      // 先确认源文件存在 (用户上次强退 → cache 被清 → 源可能已经没了)
+      const srcInfo = await FileSystem.getInfoAsync(uri);
+      if (!srcInfo || !srcInfo.exists) {
+        console.warn(`[persistImageToSandbox] 源图片已不存在, 跳过: ${uri}`);
+        return uri; // 返回原 URI, 上层按需处理
+      }
+      // 确保目标目录存在
+      const dirInfo = await FileSystem.getInfoAsync(IMAGES_DIR);
+      if (!dirInfo || !dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(IMAGES_DIR, { intermediates: true });
+      }
+      // 提取扩展名, 默认 .jpg
+      const extMatch = uri.match(/\.([a-zA-Z0-9]+)(?:\?|#|$)/);
+      const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : '.jpg';
+      // 用 device.id 或时间戳命名, 保证唯一
+      const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const destPath = `${IMAGES_DIR}${filename}`;
+      await FileSystem.copyAsync({ from: uri, to: destPath });
+      console.log(`[persistImageToSandbox] 已复制 ${uri} -> ${destPath}`);
+      return destPath;
+    } catch (err) {
+      console.warn(`[persistImageToSandbox] 复制失败, 保留原 URI: ${err?.message || err}`);
+      return uri;
+    }
+  }
+
+  /**
+   * 将备份中的类目合并到本地类目（不覆盖, 只追加）
+   * - 大类不存在 → 整个追加（带全部子类目）
+   * - 大类存在但子项缺失 → 只追加缺失的子类目
+   *
+   * 设计目的: 用户在 A 手机上自定义的类目, 通过 JSON 分享给 B 手机后,
+   * B 手机的本地已有类目不应被清空, 也不应被完全覆盖,
+   * 而应该是"取并集"。
+   *
+   * @param {Array|null|undefined} backupCategories 备份里的 categories 数组
+   * @returns {Promise<{added: number, updated: boolean}>} 追加的子类目数, 是否更新过本地
+   */
+  static async mergeCategoriesFromBackup(backupCategories) {
+    if (!Array.isArray(backupCategories) || backupCategories.length === 0) {
+      return { added: 0, updated: false };
+    }
+    try {
+      // 关键: 走原始 AsyncStorage, 不要走 DeviceCategoryService (避免被默认值兜底污染)
+      const localRaw = await this.getCategories();
+      const local = Array.isArray(localRaw) ? localRaw : [];
+
+      // 深拷贝, 避免直接改 cached
+      const merged = local.map((c) => ({
+        name: c.name,
+        subCategories: Array.isArray(c.subCategories) ? [...c.subCategories] : [],
+      }));
+      const byBigName = new Map(merged.map((c) => [c.name, c]));
+
+      let addedSubCount = 0;
+      let addedBigCount = 0;
+      for (const bc of backupCategories) {
+        if (!bc || !bc.name) continue;
+        const bigName = String(bc.name).trim();
+        if (!bigName) continue;
+        const subs = Array.isArray(bc.subCategories) ? bc.subCategories : [];
+
+        if (!byBigName.has(bigName)) {
+          // 新大类: 整体追加
+          merged.push({
+            name: bigName,
+            subCategories: subs.map((s) => String(s).trim()).filter(Boolean),
+          });
+          byBigName.set(bigName, merged[merged.length - 1]);
+          addedBigCount++;
+          addedSubCount += subs.length;
+        } else {
+          // 已存在的大类: 只追加缺失的子类目
+          const localBig = byBigName.get(bigName);
+          const existing = new Set(localBig.subCategories);
+          for (const s of subs) {
+            const subName = String(s || '').trim();
+            if (!subName) continue;
+            if (!existing.has(subName)) {
+              localBig.subCategories.push(subName);
+              existing.add(subName);
+              addedSubCount++;
+            }
+          }
+        }
+      }
+
+      if (addedSubCount > 0 || addedBigCount > 0) {
+        await this.saveCategories(merged);
+        console.log(
+          `[mergeCategoriesFromBackup] 合并完成: 新增 ${addedBigCount} 个大类, 共 ${addedSubCount} 个新子类目`
+        );
+        return { added: addedSubCount, updated: true };
+      }
+      return { added: 0, updated: false };
+    } catch (err) {
+      logError('合并类目失败', err, 'StorageService.mergeCategoriesFromBackup');
+      return { added: 0, updated: false };
     }
   }
 
@@ -1150,7 +1339,18 @@ class StorageService {
       // 清除 devices 缓存, 强制下次读取时重新加载 (新导入的图片路径立即生效)
       this.#clearCache('devices');
 
-      return { restoredImageCount, failedImageCount };
+      // 合并类目 (取并集, 不覆盖本地) — 1.1.0+ 备份含 categories
+      let mergedCategoryCount = 0;
+      try {
+        if (version === '1.1.0' || version === '1.2.0' || version === '1.3.0') {
+          const mergeRes = await this.mergeCategoriesFromBackup(backupData.data.categories);
+          mergedCategoryCount = mergeRes.added;
+        }
+      } catch (catErr) {
+        logError('合并类目失败', catErr, 'StorageService.importAllData');
+      }
+
+      return { restoredImageCount, failedImageCount, mergedCategoryCount };
     } catch (error) {
       logError('导入数据失败', error, 'StorageService.importAllData');
       throw error;
@@ -1330,6 +1530,18 @@ class StorageService {
       // 9) 读一下最终的目标库存(用于返回蓝牙绑定等元数据)
       const finalShelf = localShelves.find((s) => s && s.id === targetShelfId) || {};
 
+      // 10) 合并类目 (用户反馈: 之前导出的 JSON 不包含分类管理中新增的类目)
+      // 关键: 不覆盖本地, 只追加备份里有但本地没有的 (取并集)
+      let mergedCategoryCount = 0;
+      try {
+        if (version === '1.1.0' || version === '1.2.0' || version === '1.3.0') {
+          const mergeRes = await this.mergeCategoriesFromBackup(backupData.data.categories);
+          mergedCategoryCount = mergeRes.added;
+        }
+      } catch (catErr) {
+        logError('合并类目失败', catErr, 'StorageService.importShelfFromFile');
+      }
+
       return {
         shelfId: targetShelfId,
         shelfName: targetShelfName,
@@ -1338,6 +1550,7 @@ class StorageService {
         deviceCount: importedDevices.length,
         restoredImageCount,
         failedImageCount,
+        mergedCategoryCount,
         bluetoothMac: finalShelf.bluetoothMac || '',
         bluetoothName: finalShelf.bluetoothName || '',
       };

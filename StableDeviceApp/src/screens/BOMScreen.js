@@ -76,6 +76,49 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
   }, []);
 
+  // ========== 切库自动清空已导入的 BOM ==========
+  // 用户切换到别的库存, 已导入的 BOM 列表就属于上一个库存的上下文了,
+  // 留着只会造成"明明切了库, 列表里却还是旧的 BOM"的混乱。
+  // 用 ref 记录上一次切到的库存, 跳过首次订阅的"立即触发"以免初次进入就把 BOM 清空。
+  const prevShelfRef = useRef(null);
+  useEffect(() => {
+    let unsubscribe = null;
+    try {
+      unsubscribe = ShelfService.subscribeCurrentShelf((newShelfId) => {
+        if (!newShelfId) return;
+        if (prevShelfRef.current === null) {
+          // 首次回调: 仅记录, 不清空 (避免页面初始挂载时误清)
+          prevShelfRef.current = newShelfId;
+          return;
+        }
+        if (prevShelfRef.current === newShelfId) return; // 实际没变
+        prevShelfRef.current = newShelfId;
+        // 切库了 → 清空 BOM 列表 (含已亮灯 / 搜索词)
+        setComponents([]);
+        setFilteredComponents([]);
+        setLitDeviceIds([]);
+        setSearchQuery('');
+        setExpandedBank(null);
+        setShowPositionPicker(false);
+        setPendingComponent(null);
+        // 关闭可能残留的预览灯
+        if (previewTimeout.current) {
+          clearTimeout(previewTimeout.current);
+          previewTimeout.current = null;
+        }
+        if (currentLitPosition.current !== null) {
+          // 异步熄灯, 不 await (不等蓝牙响应)
+          sendLightCommand('lightOff', currentLitPosition.current).catch(() => {});
+          currentLitPosition.current = null;
+        }
+        console.log('[BOM] 切库, 已清空当前 BOM 列表');
+      });
+    } catch (e) {
+      console.warn('ShelfService.subscribeCurrentShelf 不可用, 跳过切库清空:', e?.message);
+    }
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+  }, []);
+
   // ==================== 蓝牙灯光控制 ====================
 
   /**
@@ -237,10 +280,13 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     try {
       setIsImporting(true);
 
-      // 打开文件选择器，仅允许选择xlsx文件
+      // 打开文件选择器, 允许 xlsx / xls / csv 三种 BOM 表格格式
       const result = await DocumentPicker.getDocumentAsync({
         type: [
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+          'application/vnd.ms-excel', // .xls
+          'text/csv', // .csv
+          'application/csv', // 部分 Android 来源
         ],
         copyToCacheDirectory: true,
       });

@@ -58,6 +58,35 @@ export function notifyShelfChanged(list) {
   if (Array.isArray(list)) _emitShelfChange(list);
 }
 
+// ========== 当前库存切换订阅 (用于 BOMScreen 自动清空导入的 BOM) ==========
+const _currentShelfListeners = new Set();
+function _emitCurrentShelfChange(id) {
+  for (const cb of _currentShelfListeners) {
+    try { cb(id); } catch (e) { /* ignore */ }
+  }
+}
+/**
+ * 订阅当前选中库存 id 的变化 (用户切库时触发)
+ * 首次调用会立即用当前 id 触发一次 callback
+ * @param {(id: string) => void} cb
+ * @returns {() => void} 取消订阅
+ */
+export function subscribeCurrentShelf(cb) {
+  _currentShelfListeners.add(cb);
+  getCurrentShelfId().then((id) => {
+    if (_currentShelfListeners.has(cb)) cb(id);
+  }).catch(() => {});
+  return () => { _currentShelfListeners.delete(cb); };
+}
+
+/**
+ * 外部直接通知当前库存变了 (用于绕过 ShelfService API 的写入路径)
+ * @param {string} id - 新的当前库存 id
+ */
+export function notifyCurrentShelfChanged(id) {
+  if (id) _emitCurrentShelfChange(id);
+}
+
 /**
  * 生成新的库存 ID（基于时间戳 + 随机数, 保证唯一）
  */
@@ -213,8 +242,13 @@ export async function setCurrentShelfId(id) {
   if (!list.some((s) => s.id === id)) {
     throw new Error('库存不存在');
   }
+  const prev = _currentShelfIdCache;
   _currentShelfIdCache = id;
   await saveData(CURRENT_SHELF_KEY, id);
+  // 通知订阅者 (BOMScreen 会监听并自动清空已导入的 BOM)
+  if (prev !== id) {
+    _emitCurrentShelfChange(id);
+  }
 }
 
 /**
@@ -292,4 +326,6 @@ export default {
   clearShelvesCache,
   subscribeShelves, // 命名导出, 同时挂到 default export, 让 ShelfService.subscribeShelves(cb) 可用
   notifyShelfChanged,
+  subscribeCurrentShelf, // 切库事件订阅 (BOMScreen 自动清空 BOM)
+  notifyCurrentShelfChanged,
 };

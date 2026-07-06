@@ -1718,7 +1718,7 @@ const styles = StyleSheet.create({
   // ===== 库存切换 FAB + BottomSheet =====
   shelfFab: {
     position: 'absolute',
-    left: 20,
+    right: 20, // 平移到右下角 (用户反馈: 左下角会遮挡器件图片)
     bottom: 18, // 紧贴底部 tab 栏上方 (避免误触, 视觉上与"库存"tab 对齐)
     width: 56,
     height: 56,
