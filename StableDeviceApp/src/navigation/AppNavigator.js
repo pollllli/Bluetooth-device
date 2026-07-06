@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { Image, View, StyleSheet, TouchableOpacity, Text } from 'react-native';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -14,7 +14,6 @@ import ScanScreen from '../screens/ScanScreen';
 import CategoryManagementScreen from '../screens/CategoryManagementScreen';
 import ShelfManagerScreen from '../screens/ShelfManagerScreen';
 import { useUser } from '../context/UserContext';
-import { subscribeShelves } from '../services/ShelfService';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -75,16 +74,7 @@ const MainTabNavigator = () => {
   const isAdmin = user?.isAdmin || false;
   const username = user?.username || 'user';
 
-  // 监听 shelves 变化: 0 库存时隐藏"连接"和"BOM"两个 tab (这俩 tab 无库时无意义)
-  const [hasShelves, setHasShelves] = useState(false);
-  useEffect(() => {
-    let unsubscribe = null;
-    // subscribeShelves 内部会立刻 emit 一次当前列表, 无需手动 getShelves
-    unsubscribe = subscribeShelves((list) => {
-      setHasShelves(Array.isArray(list) && list.length > 0);
-    });
-    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
-  }, []);
+  // 4 个 tab 全部常驻, 库存数影响由 ConnectionScreen / BOMScreen 自己监听处理
 
   // 关键: 共享的 tabBarStyle, 所有 tab 必须用同一个, 高度才不会切 tab 时跳变
   // 之前 Connection/BOM 用 `tabBarStyle: hasShelves ? undefined : { display: 'none' }`,
@@ -97,8 +87,9 @@ const MainTabNavigator = () => {
     height: 60,
     paddingBottom: 4,
   };
-  // 无库存时: 用同一个基础样式, 加上 display: 'none' (不参与切换高度, 反正也不显示)
-  const hiddenTabBarStyle = { ...baseTabBarStyle, display: 'none' };
+  // 4 个 tab 全部常驻: 0 库存时也允许用户进"连接"和"BOM"页,
+  // 由页内空状态提示"当前无库存, 请先新建或导入库存".
+  // 不要再用 tabBarButton: () => null 隐藏 tab — 那种会偷走用户入口
 
   return (
     <Tab.Navigator
@@ -129,9 +120,7 @@ const MainTabNavigator = () => {
           title: '连接',
           tabBarTestID: 'tab-connection',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bluetooth.png')),
-          // 无库存时, 这个 tab 不可用 — 隐藏掉, 避免用户进一个空白的"请先创建库存"页
-          tabBarStyle: hasShelves ? baseTabBarStyle : hiddenTabBarStyle,
-          href: hasShelves ? undefined : null,
+          tabBarStyle: baseTabBarStyle,
         }}
       />
       <Tab.Screen
@@ -140,8 +129,7 @@ const MainTabNavigator = () => {
           title: 'BOM匹配',
           tabBarTestID: 'tab-bom',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bom.png')),
-          tabBarStyle: hasShelves ? baseTabBarStyle : hiddenTabBarStyle,
-          href: hasShelves ? undefined : null,
+          tabBarStyle: baseTabBarStyle,
         }}
       >
         {(props) => <BOMScreen {...props} isAdmin={isAdmin} />}

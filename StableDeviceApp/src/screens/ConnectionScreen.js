@@ -62,7 +62,23 @@ const ConnectionScreen = ({ navigation, route }) => {
   // 自动连接相关
   const [isAutoConnecting, setIsAutoConnecting] = useState(false); // 是否正在自动连接
   const [canManualConnect, setCanManualConnect] = useState(false); // 是否允许手动连接
-  
+
+  // ========== 0 库存保护 ==========
+  // 用户在 0 库存时仍可进入此页, 但点"扫描蓝牙设备"时弹提示并 return
+  const [hasShelves, setHasShelves] = useState(true); // 默认 true 避免首屏闪一下
+  useEffect(() => {
+    let unsubscribe = null;
+    try {
+      unsubscribe = ShelfService.subscribeShelves((list) => {
+        setHasShelves(Array.isArray(list) && list.length > 0);
+      });
+    } catch (e) {
+      // ShelfService.subscribeShelves 不存在时降级为默认 true, 不影响主流程
+      console.warn('ShelfService.subscribeShelves 不可用, 跳过 shelves 监听:', e?.message);
+    }
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+  }, []);
+
   // 自动连接超时定时器引用
   const autoConnectTimeoutRef = useRef(null);
 
@@ -407,6 +423,15 @@ const ConnectionScreen = ({ navigation, route }) => {
   };
 
   const scanForBluetoothDevices = async () => {
+    // 0 库存时拦截: 弹提示, 不执行扫描
+    if (!hasShelves) {
+      Alert.alert(
+        '当前无库存',
+        '需要先新建或导入一个库存, 才能扫描蓝牙设备并绑定到对应库存。\n\n请到"设置 → 库存管理"创建。',
+        [{ text: '我知道了', style: 'default' }]
+      );
+      return;
+    }
     if (!bluetoothHandler) {
       Alert.alert('错误', '蓝牙处理器未初始化');
       return;
@@ -605,11 +630,23 @@ const ConnectionScreen = ({ navigation, route }) => {
     </TouchableOpacity>
   );
 
+  // ========== 0 库存: 顶部小黄条提示, 不阻挡操作 ==========
+  // 用户在 0 库存时仍可进入此页 + 看到完整 UI, 但点扫描时会被拦截
+  const EmptyShelfBanner = !hasShelves ? (
+    <View style={styles.emptyShelfBanner}>
+      <Text style={styles.emptyShelfBannerText}>
+        ⚠️ 当前无库存 — 扫描后无法绑定到库存, 请先到"设置"新建或导入库存
+      </Text>
+    </View>
+  ) : null;
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>蓝牙连接</Text>
       </View>
+
+      {EmptyShelfBanner}
 
       <View style={styles.connectionStatus}>
         <View style={styles.statusRow}>
@@ -801,6 +838,22 @@ const styles = StyleSheet.create({
     marginTop: 30,
     color: '#666',
     fontSize: 16,
+  },
+  // ========== 0 库存小黄条样式 (提示但不阻挡操作) ==========
+  emptyShelfBanner: {
+    backgroundColor: '#fff3cd',
+    borderLeftWidth: 4,
+    borderLeftColor: '#ff9800',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginTop: 8,
+    borderRadius: 4,
+  },
+  emptyShelfBannerText: {
+    color: '#856404',
+    fontSize: 13,
+    lineHeight: 18,
   },
 });
 

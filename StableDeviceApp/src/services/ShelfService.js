@@ -290,4 +290,6 @@ export default {
   setShelfBluetooth,
   getShelfBluetooth,
   clearShelvesCache,
+  subscribeShelves, // 命名导出, 同时挂到 default export, 让 ShelfService.subscribeShelves(cb) 可用
+  notifyShelfChanged,
 };

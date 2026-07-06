@@ -61,6 +61,21 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   const previewTimeout = useRef(null);                         // 预览灯自动熄灭定时器
   const isOperatingRef = useRef(false);                        // 操作锁，防止重复点击
 
+  // ========== 0 库存保护 ==========
+  // 用户在 0 库存时仍可进入此页, 但点"导入 BOM"时弹提示并 return
+  const [hasShelves, setHasShelves] = useState(true);
+  useEffect(() => {
+    let unsubscribe = null;
+    try {
+      unsubscribe = ShelfService.subscribeShelves((list) => {
+        setHasShelves(Array.isArray(list) && list.length > 0);
+      });
+    } catch (e) {
+      console.warn('ShelfService.subscribeShelves 不可用, 跳过 shelves 监听:', e?.message);
+    }
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+  }, []);
+
   // ==================== 蓝牙灯光控制 ====================
 
   /**
@@ -210,6 +225,15 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
    * 打开文件选择器，读取Excel文件并解析为BOM组件数据
    */
   const handleImportBOM = async () => {
+    // 0 库存时拦截: 弹提示, 不执行导入
+    if (!hasShelves) {
+      Alert.alert(
+        '当前无库存',
+        '需要先新建或导入一个库存, 才能导入 BOM 配单并与库存器件匹配。\n\n请到"设置 → 库存管理"创建。',
+        [{ text: '我知道了', style: 'default' }]
+      );
+      return;
+    }
     try {
       setIsImporting(true);
 
@@ -278,32 +302,17 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
           text: '清空',
           style: 'destructive',
           onPress: async () => {
-            // 1) 先熄灭所有当前亮灯的器件 (按真实硬件位置发 lightOff)
+            // 1) 一次性熄灭所有灯 (与"熄灭所有灯"按钮同协议: 0x03 + 0x0000)
+            // 不管有多少灯开着, 一帧搞定 — 比逐个 lightOff 更快 + 不丢帧
             try {
-              if (global.deviceConnection?.handler && litDeviceIds.length > 0) {
+              if (global.deviceConnection?.handler) {
                 const handler = global.deviceConnection.handler;
-                for (const deviceId of litDeviceIds) {
-                  const dev = devices.find((d) => d.id === deviceId);
-                  if (!dev) continue;
-                  // 沿用 BOMScreen 内部既定的位置计算逻辑 (与 handleComponentPress 一致)
-                  let hardwarePosition;
-                  if (dev.location != null && dev.location !== '') {
-                    const parsedLocation = parseInt(dev.location, 10);
-                    hardwarePosition = isNaN(parsedLocation)
-                      ? (devices.findIndex((d) => d.id === dev.id) + 1)
-                      : parsedLocation;
-                  } else {
-                    hardwarePosition = devices.findIndex((d) => d.id === dev.id) + 1;
-                  }
-                  try {
-                    await handler.sendCommand({ type: 'lightOff', lightId: hardwarePosition });
-                  } catch (e) { /* 忽略, 继续 */ }
-                  // 间隔 300ms, 避免蓝牙队列阻塞
-                  await new Promise((r) => setTimeout(r, 300));
-                }
+                await handler.sendCommand({ type: 'controlAll', state: false });
+                console.log('[BOM 清空] 一次性熄灭所有灯完成');
               }
             } catch (e) {
               console.warn('[BOM 清空] 熄灭灯光异常:', e);
+              // 即使熄灯失败也继续清空列表, 至少 UI 状态干净
             }
             // 2) 清空 state
             setComponents([]);
@@ -997,12 +1006,23 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
   // ==================== 界面渲染 ====================
 
+  // 0 库存时顶部小黄条提示, 不阻挡用户操作
+  const EmptyShelfBanner = !hasShelves ? (
+    <View style={styles.bomEmptyShelfBanner}>
+      <Text style={styles.bomEmptyShelfBannerText}>
+        ⚠️ 当前无库存 — 导入 BOM 后无法与器件匹配, 请先到"设置"新建或导入库存
+      </Text>
+    </View>
+  ) : null;
+
   return (
     <SafeAreaView style={styles.container}>
       {/* 页面标题栏 */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>BOM 匹配</Text>
       </View>
+
+      {EmptyShelfBanner}
 
       <ScrollView style={styles.content}>
         <View style={styles.componentsList}>
@@ -1118,16 +1138,16 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                       <Text style={styles.deviceInfo}>
                         <Text style={styles.valueText}>{component.position || '未设置'}</Text>
                       </Text>
-                      {/* 底部行：左侧位置信息，右侧数量 */}
+                      {/* 底部行：左侧数量（始终显示），右侧位置信息（仅上架/匹配后才有） */}
                       <View style={styles.bottomRow}>
-                        <Text style={[styles.statusText, { color: textColor }]}>
-                          <Text style={styles.valueText}>{positionsText}</Text>
-                        </Text>
                         {component.quantity && (
                           <Text style={styles.quantityText}>
                             <Text style={styles.valueText}>{component.quantity}</Text>
                           </Text>
                         )}
+                        <Text style={[styles.statusText, { color: textColor }]}>
+                          <Text style={styles.valueText}>{positionsText}</Text>
+                        </Text>
                       </View>
                     </View>
                   </TouchableOpacity>
@@ -1173,7 +1193,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                       <Text style={styles.deviceInfo}>
                         <Text style={styles.valueText}>{component.position || '未设置'}</Text>
                       </Text>
-                      {/* 底部行：右侧数量（左侧的状态提示已移除，橘色背景已足够辨识） */}
+                      {/* 底部行：左侧数量（始终显示），未匹配时无位置 */}
                       <View style={styles.bottomRow}>
                         {component.quantity && (
                           <Text style={styles.quantityText}>
@@ -1325,6 +1345,22 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  // ========== 0 库存小黄条样式 (提示但不阻挡操作) ==========
+  bomEmptyShelfBanner: {
+    backgroundColor: '#fff3cd',
+    borderLeftWidth: 4,
+    borderLeftColor: '#ff9800',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginTop: 8,
+    borderRadius: 4,
+  },
+  bomEmptyShelfBannerText: {
+    color: '#856404',
+    fontSize: 13,
+    lineHeight: 18,
   },
   content: {
     flex: 1,
