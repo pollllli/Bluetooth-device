@@ -1248,6 +1248,61 @@ class BluetoothHandler {
   }
 
   /**
+   * 快速"全灭"指令 - 专为切库场景设计
+   *
+   * 为什么不直接用 sendCommand?
+   *   sendCommand 内部先尝试 writeCharacteristicWithResponseForDevice (等 ACK),
+   *   如果 BLE 链路实际已死 (例如 App 在后台被 OS 挂起后回前台), 这个调用会
+   *   **卡死直到超时**(几秒甚至更长), 等它走完 WithResponse → WithoutResponse
+   *   → ... 全部 fallback, 已经过 5-10 秒, 用户体验上就是"切库了但灯还亮着".
+   *
+   * 本方法:
+   *   - 只走 writeCharacteristicWithoutResponseForDevice (fire-and-forget, 不等 ACK)
+   *   - 1.5 秒硬超时
+   *   - 失败返回 { success: false, timedOut: true }, 抛不抛错由调用方决定
+   *   - 不调 isConnected() 检查, 因为 BLE 链路挂起时 isConnected 仍可能返回 true
+   *
+   * 调用方一般用 try/catch 抓住, 切库主流程不阻塞。
+   */
+  async fastControlAll(state) {
+    const TIMEOUT_MS = 1500;
+    if (Platform.OS === 'web') return { success: false, reason: 'web' };
+    if (!this.connectedDevice || !this.manager) {
+      return { success: false, reason: 'no-connection' };
+    }
+    if (!this.serviceUUID || !this.writeCharacteristicUUID) {
+      return { success: false, reason: 'no-uuid' };
+    }
+    let frame;
+    try {
+      frame = this.commandBuilder.buildControlAllLightsCommand(state !== false);
+    } catch (e) {
+      return { success: false, reason: 'build-failed', error: e };
+    }
+    const base64Data = this.bytesToBase64(frame);
+    const deviceId = this.connectedDevice.id;
+    try {
+      await Promise.race([
+        this.manager.writeCharacteristicWithoutResponseForDevice(
+          deviceId,
+          this.serviceUUID,
+          this.writeCharacteristicUUID,
+          base64Data
+        ),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('fastControlAll 超时 (' + TIMEOUT_MS + 'ms)')),
+            TIMEOUT_MS
+          )
+        ),
+      ]);
+      return { success: true };
+    } catch (e) {
+      return { success: false, reason: 'write-failed', error: e };
+    }
+  }
+
+  /**
    * 断开与蓝牙设备的连接
    */
   /**
@@ -1430,6 +1485,14 @@ class BluetoothHandler {
 
   /**
    * 断开与蓝牙设备的连接
+   *
+   * 【切库/退出前必关灯】在 cancelConnection 之前先尝试发 controlAll: false,
+   * 这样即使切库时用户不在 BOM 页(没有 useEffect 监听),
+   * 也保证物理上把旧库存的灯灭掉。
+   *
+   * 优先 fastControlAll (不等 ACK + 1.5s 超时), 失败兜底 sendCommand。
+   * 任何一步失败都被 try/catch 抓住, 不阻塞断开主流程。
+   * (链路真死了 — 切库本身不受影响, 旧库存的灯只能等用户手动断电)
    */
   async disconnect() {
     try {
@@ -1440,10 +1503,44 @@ class BluetoothHandler {
         return;
       }
 
-      // 如果有连接的设备，取消连接
+      // 如果有连接的设备, 断开前先发"全灭"指令
       if (this.connectedDevice) {
-        await this.connectedDevice.cancelConnection();
-        console.log('设备断开连接成功');
+        try {
+          // 优先用 fastControlAll: 不等 ACK + 1.5s 超时, 不会卡住断开流程
+          if (typeof this.fastControlAll === 'function') {
+            const r = await this.fastControlAll(false);
+            console.log(
+              '[BluetoothHandler] 断开前 fastControlAll:',
+              r && r.success ? 'OK' : ('FAIL ' + (r && r.reason))
+            );
+            if (!r || !r.success) {
+              // 兜底
+              try {
+                await this.sendCommand({ type: 'controlAll', state: false });
+                console.log('[BluetoothHandler] 断开前已熄灭所有灯 (兜底 sendCommand)');
+              } catch (e) {
+                console.warn('[BluetoothHandler] 断开前兜底 sendCommand 也失败:', e?.message || e);
+              }
+            } else {
+              console.log('[BluetoothHandler] 断开前已熄灭所有灯 (fastControlAll)');
+            }
+          } else {
+            await this.sendCommand({ type: 'controlAll', state: false });
+            console.log('[BluetoothHandler] 断开前已熄灭所有灯 (sendCommand)');
+          }
+        } catch (e) {
+          console.warn(
+            '[BluetoothHandler] 断开前灭灯失败 (不阻塞断开, 链路可能已死):',
+            e?.message || e
+          );
+        }
+        try {
+          await this.connectedDevice.cancelConnection();
+          console.log('设备断开连接成功');
+        } catch (cancelErr) {
+          // 链路本来可能就已经死了, 静默继续
+          console.warn('[BluetoothHandler] cancelConnection 失败 (链路可能已死):', cancelErr?.message || cancelErr);
+        }
       }
       this.connectedDevice = null;
       // 清除全局连接状态，确保其他页面能正确检测到断开状态

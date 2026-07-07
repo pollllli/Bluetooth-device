@@ -1380,6 +1380,23 @@ class StorageService {
         throw new Error('无效的备份数据');
       }
 
+      // 【最早期动作】先把旧蓝牙链路断开
+      // 微信分享导入时, App 已经在后台待过, BLE 链路大概率被 OS 挂起/已死
+      // 如果不在这一步断开, 后面所有"灭旧库存灯"的操作都会因为 sendCommand 链路
+      // 死了而静默失败, 但 try/catch 不抛错 — 用户看到的就是"灯还亮着但日志说成功了"
+      // 调 disconnect(): 内部会先发 controlAll: false(尝试灭灯), 再 cancelConnection(清理链路)
+      // 即使 sendCommand 失败, cancelConnection 也会尽量把链路关掉
+      try {
+        const conn = (typeof global !== 'undefined') ? global.deviceConnection : null;
+        if (conn && conn.handler && typeof conn.handler.disconnect === 'function') {
+          console.log('[importShelfFromFile] 导入前先断开旧蓝牙链路, 强制灭旧库存灯');
+          await conn.handler.disconnect();
+        }
+      } catch (discErr) {
+        // 忽略, 不阻塞导入主流程
+        console.warn('[importShelfFromFile] 导入前断旧蓝牙失败 (不阻塞):', discErr?.message || discErr);
+      }
+
       // 1) 验证备份数据版本 (兼容 1.0.0 / 1.1.0 / 1.2.0 / 1.3.0)
       const version = backupData.version || '1.0.0';
       const supportedVersions = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'];
@@ -1514,7 +1531,31 @@ class StorageService {
       }
 
       // 7) 切换 currentShelfId 为导入的库存 (导入完成, 当前库存跟随)
-      await saveData('currentShelfId', targetShelfId);
+      // 【关键】之前直接 saveData, 绕过了 ShelfService.setCurrentShelfId,
+      // 导致 controlAll: false 不会发, 灭灯/清 BOM 都不会发生
+      // 现在走 setCurrentShelfId, 让切库/灭灯的副作用统一收敛
+      //
+      // 【重要】必须在 setCurrentShelfId 之前清掉 ShelfService 的 shelvesCache,
+      // 因为 importShelfFromFile 是直接 getData('shelves') 写入的, 没经过 ShelfService,
+      // 它的 _shelvesCache 还是旧的 (不含新库存). setCurrentShelfId 内部
+      // 校验 `list.some(s => s.id === id)` 拿的是旧 cache, 会报"库存不存在".
+      // 解决: 显式清 cache, 让 setCurrentShelfId 走 getShelves() → AsyncStorage
+      try {
+        const ShelfService = require('./ShelfService');
+        if (ShelfService && typeof ShelfService.clearShelvesCache === 'function') {
+          ShelfService.clearShelvesCache();
+        }
+        if (ShelfService && typeof ShelfService.setCurrentShelfId === 'function') {
+          await ShelfService.setCurrentShelfId(targetShelfId);
+        } else {
+          // 兜底: ShelfService 不可用时, 走原 saveData
+          await saveData('currentShelfId', targetShelfId);
+        }
+      } catch (switchErr) {
+        // ShelfService 报错时, 至少保证 currentShelfId 写盘成功
+        logError('setCurrentShelfId 失败, 降级到 saveData', switchErr, 'StorageService.importShelfFromFile');
+        await saveData('currentShelfId', targetShelfId);
+      }
 
       // 8) 清除缓存
       this.#clearCache('devices');

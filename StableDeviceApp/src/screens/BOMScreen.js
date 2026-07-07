@@ -26,6 +26,14 @@ import ShelfService from '../services/ShelfService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import * as pendingBomImport from '../utils/pendingBomImport';
 import { usePendingBomImport } from '../utils/pendingBomImport';
+import { emitLightAllOff, subscribe as subscribeLight } from '../utils/lightEvents';
+import {
+  subscribeLightStatus,
+  getLitDeviceIdsSnapshot,
+  addLitDevice,
+  removeLitDevice,
+  clearAllLitDevices,
+} from '../utils/lightStatusStore';
 
 const BOMScreen = ({ navigation, isAdmin = false }) => {
   console.log('BOMScreen received isAdmin:', isAdmin);
@@ -84,7 +92,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   useEffect(() => {
     let unsubscribe = null;
     try {
-      unsubscribe = ShelfService.subscribeCurrentShelf((newShelfId) => {
+      unsubscribe = ShelfService.subscribeCurrentShelf(async (newShelfId) => {
         if (!newShelfId) return;
         if (prevShelfRef.current === null) {
           // 首次回调: 仅记录, 不清空 (避免页面初始挂载时误清)
@@ -93,7 +101,11 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
         }
         if (prevShelfRef.current === newShelfId) return; // 实际没变
         prevShelfRef.current = newShelfId;
-        // 切库了 → 清空 BOM 列表 (含已亮灯 / 搜索词)
+        // 切库了 — 物理上"全灭灯"由 ShelfService.setCurrentShelfId 统一处理 (不依赖本页面是否 mounted)
+        // 这里只负责: 清 BOM 页的本地 state (litDeviceIds / components / 搜索词)
+        // 1) 通知 DeviceListScreen 同步清空它自己的 litDeviceIds
+        emitLightAllOff();
+        // 2) 清空 BOM 列表 (含已亮灯 / 搜索词)
         setComponents([]);
         setFilteredComponents([]);
         setLitDeviceIds([]);
@@ -101,7 +113,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
         setExpandedBank(null);
         setShowPositionPicker(false);
         setPendingComponent(null);
-        // 关闭可能残留的预览灯
+        // 3) 关闭可能残留的预览灯 (单灯位预览, 和切库全灭灯是两回事)
         if (previewTimeout.current) {
           clearTimeout(previewTimeout.current);
           previewTimeout.current = null;
@@ -152,22 +164,109 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     }
   };
 
+  /**
+   * 熄灭所有灯 (controlAll: false) — 用于 BOM 失焦 / 切库 / 导入新数据时
+   *
+   * 关键: 之前 useFocusEffect 的 cleanup 只调 turnOffCurrentLight(),
+   * 那个函数只灭"currentLitPosition.current" 记录的最后一个位置。
+   * 如果用户在 BOM 页点了多个器件亮灯 (位置 1, 2, 3),
+   * currentLitPosition 只记最后一个, 切回库存时只灭那一个, 其它残留。
+   *
+   * 现在改成 controlAll: false, 一帧全灭, 不依赖 litDeviceIds 的精确性。
+   *
+   * 【重要 — vivo 兼容性】
+   * 不能返回 Promise, 不能在 cleanup 期间 await BLE 写。
+   * BLE 操作必须 fire-and-forget, 推到下一个 tick (setTimeout 0) 异步执行。
+   * 否则在某些 Android ROM (vivo) 上, component 失焦瞬间发起的 BLE 写会导致
+   * unhandled promise rejection → RN bridge 异常 → 整棵 View 树重新挂载失败 → UI 消失。
+   */
+  const turnOffAllLights = () => {
+    // 同步: 清预览定时器 + 重置 ref
+    if (previewTimeout.current) {
+      clearTimeout(previewTimeout.current);
+      previewTimeout.current = null;
+    }
+    currentLitPosition.current = null;
+    // 异步: 推到下一个 tick, 不阻塞 React unmount/cleanup
+    setTimeout(() => {
+      const conn = global.deviceConnection;
+      const handler = conn && conn.handler;
+      if (!handler) return;
+      try {
+        if (typeof handler.fastControlAll === 'function') {
+          const p = handler.fastControlAll(false);
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        } else if (typeof handler.sendCommand === 'function') {
+          const p = handler.sendCommand({ type: 'controlAll', state: false });
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch (e) {
+        // 同步抛出也吞掉, 不能让它冒到 RN bridge
+      }
+    }, 0);
+  };
+
   // ==================== 页面生命周期 ====================
 
   /**
-   * 页面获得焦点时加载器件数据，离开时熄灭灯光
+   * 同步 lightStatusStore → BOM 本地 litDeviceIds
+   *
+   * 之前 BOM 自己维护一份 litDeviceIds (useState), 不订阅 store,
+   * 导致其他页面 (DeviceListScreen / ShelfService.clearBomAndLights) 触发
+   * clearAllLitDevices 时, BOM 这边的"亮灯"绿底不会被清掉。
+   * 切回库存时物理灯灭了但 BOM 的绿底还在 — UI/物理不一致。
+   *
+   * 修复: 订阅 lightStatusStore 事件, 收到任何 type 都以 store 为准同步 BOM 本地 state.
+   * 同时页面 mount/focus 时主动拉一次 snapshot (兜底事件错过的情况).
+   *
+   * 【重要 — vivo 兼容性】
+   * listener 内部 setState 之前必须检查 mounted 标记。
+   * 否则在某些 Android ROM (vivo) 上, component 失焦后 listener 仍可能
+   * 触发 setState → "Can't perform state update on unmounted component"
+   * 在该 ROM 上会触发 RN bridge 异常 → 整棵 View 树 UI 消失。
    */
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    const unsubscribe = subscribeLightStatus(() => {
+      if (!isMountedRef.current) return;
+      const snap = getLitDeviceIdsSnapshot();
+      setLitDeviceIds(snap);
+    });
+    return () => {
+      isMountedRef.current = false;
+      unsubscribe();
+    };
+  }, []);
+
   useFocusEffect(
     React.useCallback(() => {
+      isMountedRef.current = true;
+      // 页面 focus 时主动拉一次 snapshot, 兜底 emit 错过
+      if (isMountedRef.current) {
+        const snap = getLitDeviceIdsSnapshot();
+        setLitDeviceIds(snap);
+      }
+
       loadDevices();
       // 同步当前选中库存 (从设置页/库存页切库后保持一致)
       ShelfService.getCurrentShelfId()
         .then((id) => {
-          if (id) setCurrentShelfId(id);
+          if (isMountedRef.current && id) setCurrentShelfId(id);
         })
         .catch((e) => console.warn('[BOM] 读取当前库存失败:', e));
       return () => {
-        turnOffCurrentLight();
+        // 【关键 — vivo 兼容性】失焦时:
+        //  1) 同步 set mounted = false (防止后续 store listener setState)
+        //  2) 同步清空本地 litDeviceIds
+        //  3) 同步 clearAllLitDevices (内部 emit 同步触发其他页面, 但 store listener 会先检查 mounted)
+        //  4) 同步 emit 兜底
+        //  5) turnOffAllLights() 内部把 BLE 写推到 setTimeout(0), 不阻塞 cleanup
+        isMountedRef.current = false;
+        setLitDeviceIds([]);
+        clearAllLitDevices();
+        emitLightAllOff();
+        turnOffAllLights();
       };
     }, [])
   );
@@ -350,20 +449,33 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
           onPress: async () => {
             // 1) 一次性熄灭所有灯 (与"熄灭所有灯"按钮同协议: 0x03 + 0x0000)
             // 不管有多少灯开着, 一帧搞定 — 比逐个 lightOff 更快 + 不丢帧
+            // 优先用 fastControlAll (不等 ACK + 1.5s 超时), 失败再兜底 sendCommand
             try {
-              if (global.deviceConnection?.handler) {
-                const handler = global.deviceConnection.handler;
-                await handler.sendCommand({ type: 'controlAll', state: false });
+              const handler = global.deviceConnection?.handler;
+              if (handler) {
+                if (typeof handler.fastControlAll === 'function') {
+                  const r = await handler.fastControlAll(false);
+                  if (!r || !r.success) {
+                    try { await handler.sendCommand({ type: 'controlAll', state: false }); } catch (e) { /* ignore */ }
+                  }
+                } else {
+                  await handler.sendCommand({ type: 'controlAll', state: false });
+                }
                 console.log('[BOM 清空] 一次性熄灭所有灯完成');
               }
             } catch (e) {
               console.warn('[BOM 清空] 熄灭灯光异常:', e);
               // 即使熄灯失败也继续清空列表, 至少 UI 状态干净
             }
-            // 2) 清空 state
+            // 2) 走 store 集中清空 (DeviceListScreen / 后续其他页面都会收到)
+            // 原因: 之前 emitLightAllOff 偶尔漏, 走 store 是单一权威源
+            clearAllLitDevices();
+            // 3) emit 兜底 (兼容老的 subscribeLight listener)
+            emitLightAllOff();
+            // 4) 清空本地 state
             setComponents([]);
             setFilteredComponents([]);
-            setLitDeviceIds([]);
+            setLitDeviceIds(getLitDeviceIdsSnapshot());
             setSearchQuery('');
             console.log('[BOM] 已清空 BOM 匹配列表');
           },
@@ -820,7 +932,9 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
             lightId: hardwarePosition,
           });
           if (response.success) {
-            setLitDeviceIds(prev => prev.filter(id => id !== targetDevice.id));
+            // 走 store 统一管理: 移除 + emit, 其他页面同步
+            removeLitDevice(targetDevice.id);
+            setLitDeviceIds(getLitDeviceIdsSnapshot());
           }
           await new Promise(resolve => setTimeout(resolve, 300));
         }
@@ -839,7 +953,9 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
             lightId: hardwarePosition,
           });
           if (response.success) {
-            setLitDeviceIds(prev => [...prev, targetDevice.id]);
+            // 走 store 统一管理: 添加 + emit, 其他页面同步
+            addLitDevice(targetDevice.id);
+            setLitDeviceIds(getLitDeviceIdsSnapshot());
           }
           await new Promise(resolve => setTimeout(resolve, 300));
         }
@@ -1260,6 +1376,41 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
               }
             })
         )}
+
+        {/* 0 器件空状态: 之前切库后页面"啥都没有", 用户以为卡了 */}
+        {filteredComponents.length === 0 && components.length === 0 && (
+          <View style={styles.bomEmptyState}>
+            <Text style={styles.bomEmptyStateIcon}>📋</Text>
+            <Text style={styles.bomEmptyStateTitle}>暂无 BOM 匹配</Text>
+            <Text style={styles.bomEmptyStateText}>
+              {hasShelves
+                ? '点击右上角"导入"按钮, 选择 BOM 表格开始匹配'
+                : '请先到"设置"新建或导入库存, 再导入 BOM 表格'}
+            </Text>
+            {hasShelves && (
+              <TouchableOpacity
+                style={styles.bomEmptyStateButton}
+                onPress={handleImportBOM}
+                disabled={isImporting}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.bomEmptyStateButtonText}>
+                  {isImporting ? '导入中...' : '导入 BOM 表格'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+        {/* 搜索无结果: 列表有数据但搜索没匹配 */}
+        {filteredComponents.length === 0 && components.length > 0 && (
+          <View style={styles.bomEmptyState}>
+            <Text style={styles.bomEmptyStateIcon}>🔍</Text>
+            <Text style={styles.bomEmptyStateTitle}>没有匹配的器件</Text>
+            <Text style={styles.bomEmptyStateText}>
+              试试别的关键词, 或点"清空"重新搜索
+            </Text>
+          </View>
+        )}
         </View>
       </ScrollView>
 
@@ -1407,6 +1558,41 @@ const styles = StyleSheet.create({
     color: '#856404',
     fontSize: 13,
     lineHeight: 18,
+  },
+  // ========== BOM 0 数据空状态 (替换之前的"啥也没有") ==========
+  bomEmptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 24,
+  },
+  bomEmptyStateIcon: {
+    fontSize: 56,
+    marginBottom: 16,
+  },
+  bomEmptyStateTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 8,
+  },
+  bomEmptyStateText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  bomEmptyStateButton: {
+    backgroundColor: '#ff9800',
+    paddingHorizontal: 28,
+    paddingVertical: 12,
+    borderRadius: 24,
+  },
+  bomEmptyStateButtonText: {
+    color: 'white',
+    fontSize: 15,
+    fontWeight: '600',
   },
   content: {
     flex: 1,

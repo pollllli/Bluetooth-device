@@ -50,6 +50,15 @@ import ShelfService from '../services/ShelfService';
 import SwipeableRow from '../components/SwipeableRow';
 import { consumePendingAutoConnect } from '../utils/pendingAutoConnect';
 import { autoConnectBluetooth } from '../utils/autoConnectBluetooth';
+import { subscribe as subscribeLight, emitLightAllOff } from '../utils/lightEvents';
+import {
+  subscribeLightStatus,
+  getLitDeviceIdsSnapshot,
+  addLitDevice,
+  removeLitDevice,
+  setLitDevices,
+  clearAllLitDevices,
+} from '../utils/lightStatusStore';
 
 const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   /**
@@ -232,6 +241,22 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     };
   }, []);
 
+  // 订阅全局灯光状态 (集中式 store) — 解决"emit 错过 / mount 时拿旧 state"的竞态
+  // 场景: BOM 页"清空" / "失焦" / "切库" → clearAllLitDevices() / emitLightAllOff
+  //       → 这里收到事件 → 同步清空本地 litDeviceIds → 标签绿底消失
+  // 三重保险:
+  //   1) 订阅 store 事件 (其他页面触发时立刻收到)
+  //   2) 页面 mount/focus 时主动拉 snapshot (兜底 emit 错过的情况)
+  //   3) 自己点亮的灯直接 add/remove 到 store (统一权威源)
+  useEffect(() => {
+    const unsubscribe = subscribeLightStatus((event) => {
+      // 不管什么 type, 全部以 store 为准, 重新同步本地 state
+      const snap = getLitDeviceIdsSnapshot();
+      dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: snap });
+    });
+    return unsubscribe;
+  }, []);
+
   // 当页面获得焦点时重新加载设备数据，并保留搜索状态
   useFocusEffect(
     useCallback(() => {
@@ -295,6 +320,11 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       })();
 
       loadDevices();
+
+      // 关键: 页面 focus 时主动拉一次 litStatusStore 的 snapshot 同步本地 state
+      // 兜底 emit 错过 / 跨页面 mount 时机竞态 (问题 1 的根因)
+      const snap = getLitDeviceIdsSnapshot();
+      dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: snap });
 
       setTimeout(() => {
         if (currentSearchQuery.trim() !== '') {
@@ -565,9 +595,11 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           });
 
           if (response.success) {
+            // 通过 store 统一管理: 移除 + emit, 其他页面同步
+            removeLitDevice(device.id);
             dispatch({
               type: 'SET_LIT_DEVICE_IDS',
-              payload: litDeviceIds.filter((id) => id !== device.id),
+              payload: getLitDeviceIdsSnapshot(),
             });
             showSuccessMessage(`已熄灯: ${device.name}`);
           } else {
@@ -580,7 +612,9 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           });
 
           if (response.success) {
-            dispatch({ type: 'TOGGLE_LIT_DEVICE', payload: device.id });
+            // 通过 store 统一管理: 添加 + emit, 其他页面同步
+            addLitDevice(device.id);
+            dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: getLitDeviceIdsSnapshot() });
             showSuccessMessage(`已亮灯: ${device.name} (位置: ${hardwarePosition})`);
           } else {
             Alert.alert('错误', `亮灯失败: ${response.message}`);
@@ -843,6 +877,8 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   }, [dispatch]);
 
   // 点亮所有灯
+  // 【关键】物理 controlAll: true 协议 + store 一次性 setLitDevices + 本地 dispatch
+  // 失败时不修改 store (避免"没真亮但 UI 全绿"假状态)
   const handleControlAllLightsOn = useCallback(async () => {
     if (!isConnected || !global.deviceConnection) {
       Alert.alert('提示', '请先在连接页面连接蓝牙设备');
@@ -852,18 +888,29 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
 
     try {
       const { handler } = global.deviceConnection;
-      const response = await handler.sendCommand({
-        type: 'controlAll',
-        state: true,
-      });
+      // 优先 fastControlAll (不等 ACK + 1.5s 超时), 失败再 sendCommand
+      let ok = false;
+      if (typeof handler.fastControlAll === 'function') {
+        const r = await handler.fastControlAll(true);
+        if (r && r.success) ok = true;
+      }
+      if (!ok) {
+        const response = await handler.sendCommand({
+          type: 'controlAll',
+          state: true,
+        });
+        ok = response.success;
+      }
 
-      if (response.success) {
+      if (ok) {
         showSuccessMessage('已点亮所有灯');
         const currentDevices = await StorageService.getDevices();
         const allDeviceIds = currentDevices.map(d => d.id);
-        dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: allDeviceIds });
+        // 走 store: 一次性 set, emit, 所有页面同步
+        setLitDevices(allDeviceIds);
+        dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: getLitDeviceIdsSnapshot() });
       } else {
-        Alert.alert('错误', `操作失败: ${response.message}`);
+        Alert.alert('错误', '操作失败');
       }
     } catch (error) {
       logError(
@@ -876,6 +923,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   }, [isConnected, showSuccessMessage]);
 
   // 熄灭所有灯
+  // 【关键 bug 修复】之前只 dispatch 本地 state, 没走 store 集中清空。
+  // 后果: 用户"点亮所有" → store = allDeviceIds → "熄灭所有" → 本地 [] 但 store 残留
+  //       → 之后任意 addLitDevice/snapshot 同步 → 残留 ids 全部回到本地 → 全部器件标签变绿
+  // 修复: 走 clearAllLitDevices() + emitLightAllOff() + 本地 dispatch, 三个一起清
   const handleControlAllLightsOff = useCallback(async () => {
     if (!isConnected || !global.deviceConnection) {
       Alert.alert('提示', '请先在连接页面连接蓝牙设备');
@@ -885,16 +936,30 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
 
     try {
       const { handler } = global.deviceConnection;
-      const response = await handler.sendCommand({
-        type: 'controlAll',
-        state: false,
-      });
+      // 优先 fastControlAll (不等 ACK + 1.5s 超时), 失败再 sendCommand
+      let ok = false;
+      if (typeof handler.fastControlAll === 'function') {
+        const r = await handler.fastControlAll(false);
+        if (r && r.success) ok = true;
+      }
+      if (!ok) {
+        const response = await handler.sendCommand({
+          type: 'controlAll',
+          state: false,
+        });
+        ok = response.success;
+      }
 
-      if (response.success) {
+      if (ok) {
         showSuccessMessage('已熄灭所有灯');
+        // 【核心修复】走 store 集中清空 — 不然 store 残留, 之后会被 snapshot 拉回
+        clearAllLitDevices();
+        // 兼容老 listener (subscribeLight)
+        emitLightAllOff();
+        // 本地 state 也清
         dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: [] });
       } else {
-        Alert.alert('错误', `操作失败: ${response.message}`);
+        Alert.alert('错误', '操作失败');
       }
     } catch (error) {
       logError(

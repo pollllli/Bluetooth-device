@@ -24,6 +24,7 @@ import { UserProvider } from './src/context/UserContext';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import StorageService from './src/services/StorageService';
+import ShelfService from './src/services/ShelfService';
 import { logError } from './src/utils/ErrorHandler';
 import * as pendingBomImport from './src/utils/pendingBomImport';
 import { setPendingAutoConnect } from './src/utils/pendingAutoConnect';
@@ -426,6 +427,10 @@ export default function App() {
     if (!pendingImportUri) return;
     setIsImporting(true);
     try {
+      // 【关键】读文件前先灭灯 + 清 BOM — 用户在弹窗点"导入"时, 当前库存的
+      // BOM 状态必然会被废弃, 这一步在物理层先清掉, 避免"弹窗已确认但灯还亮着"
+      try { await ShelfService.clearBomAndLights(); } catch (e) { /* ignore */ }
+
       const fileContent = await readImportFile(pendingImportUri);
       const backupData = JSON.parse(fileContent);
       const result = await StorageService.importShelfFromFile(pendingImportName, backupData);

@@ -337,6 +337,33 @@ StableDeviceApp/
 
 ## 更新日志
 
+### v1.2.2 (2026-07-07)
+
+**新增强化：**
+
+- **集中式亮灯状态管理**：新增 `lightStatusStore` 模块，作为跨页面"当前已亮灯器件"单一权威源。BOM 页和库存页都订阅同一个 store，任意页面点亮/熄灭都会同步到所有页面，不再出现"切回时绿底残留"或"清空后另一页还在显示亮灯"的问题
+- **快速灭灯指令**：新增 `BluetoothHandler.fastControlAll()` 方法，走 `writeCharacteristicWithoutResponseForDevice`（不等 ACK）+ 1.5 秒硬超时。在 OS 挂起 BLE 链路时（如微信分享时 App 进入后台），不会被 `WithResponse` 写入卡死 5-10 秒
+- **切库即灭灯机制完善**：`ShelfService.setCurrentShelfId` 在 `prev !== id` 时优先 `fastControlAll` 灭灯，失败兜底 `sendCommand`；同步清 store + emit 给所有页面
+- **导入前自动清灯 + 清 BOM**：`ShelfService.clearBomAndLights()` 公开函数；`ProfileScreen.handleImportData` 和 `App.tsx.handleConfirmImport`（外部 App 触发）入口都先调一次，弹窗出现瞬间就清空旧库存状态
+- **BOM 失焦完整清理**：BOM 页面失焦时同步清 `litDeviceIds` + 走 store + 物理灭灯（推到 `setTimeout(0)` 异步执行）
+
+**问题修复：**
+
+- 修复从 BOM 切回库存页时"已亮"绿底残留（之前 cleanup 只 emit 没清自己）
+- 修复切库时旧库存物理位置灯不熄灭（之前 `sendCommand` 在 BLE 链路被 OS 挂起时卡死切库流程）
+- 修复从微信导入库存时旧库存灯不熄灭（链路死的情况下不再依赖 `sendCommand`）
+- 修复"上次运行出现错误"反复弹出：0 库存时 `setCurrentShelfId` 不再 `saveData(undefined)`，改用 `removeData` 清掉旧记录
+- 修复 BOM 页面失焦时只灭最后点亮的灯（之前 `turnOffCurrentLight` 只灭 `currentLitPosition` 记录的最后一个位置）
+- 修复"清空 BOM"按钮只 emit 不走 store，绿底偶发残留
+- 修复切库时切到与旧库存同名 id 时的二次切库灭灯遗漏
+- **修复 vivo 手机 BOM 页面 UI 偶发消失（只剩标题栏）**：`turnOffAllLights` 改为 fire-and-forget 不发起 Promise；store listener 加 `isMountedRef` 标记防止 unmount 后 setState
+
+**内部优化：**
+
+- `BOMScreen` 提取 `turnOffAllLights()` 工具函数，统一 BOM 失焦/切库/清空三个场景的物理灭灯调用
+- `importShelfFromFile` 不再直接 `saveData('currentShelfId')`，改走 `ShelfService.setCurrentShelfId`，让切库副作用统一收敛
+- `ShelfService.setCurrentShelfId` 内部并发处理 controlAll + emit + cache 清理
+
 ### v1.2.1 (2026-07-03)
 
 **行为变更：**

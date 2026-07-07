@@ -271,6 +271,13 @@ const ProfileScreen = ({ navigation, route }) => {
 
   // 数据导入 (新流程: 按文件名作为库存名, 同名覆盖/异名新增)
   const handleImportData = async () => {
+    // 【重要】弹窗"数据导入"出现就清空当前库存的 BOM + 熄灭所有灯
+    // 原因: 用户既然选择导入新数据, 当前库存的 BOM 状态(亮灯、组件列表)就必然会被废弃,
+    //       不如在弹窗这一刻就清掉, 避免出现"弹窗已弹但灯还亮着"的视觉割裂,
+    //       也避免 importShelfFromFile 内部 setCurrentShelfId 时(覆盖同名库)重复发控制命令
+    // 用 .catch 兜底: 即使蓝牙断/模块未注册也不阻塞用户操作
+    try { await ShelfService.clearBomAndLights(); } catch (e) { /* ignore */ }
+
     Alert.alert(
       '数据导入',
       '系统将根据文件名判断:\n• 同名库存 → 覆盖该库存的器件\n• 异名库存 → 自动新增为新库存\n\n此操作不会影响其他库存。',

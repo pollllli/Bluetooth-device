@@ -82,6 +82,10 @@ const NewDeviceScreen = ({ navigation, route }) => {
   // 标记 allDevices 是否已加载完成 (区分"加载中"和"加载完但空架")
   // 不加这个 flag 的话, 空架时 allDevices.length === 0 永远 return, useEffect 永远不触发
   const [allDevicesLoaded, setAllDevicesLoaded] = useState(false);
+  // 位置选择器数据 — 缓存到 state 而不是 render 时计算
+  // 之前直接 getAllPositions().slice() — 但 getAllPositions 是 async, 返回 Promise
+  // Promise.slice === undefined → 展开 bank 时崩: "TypeError: undefined is not a function"
+  const [positions, setPositions] = useState([]);
   const [expandedBank, setExpandedBank] = useState(null);
   const [categories, setCategories] = useState([]);
   const [categorySearchQuery, setCategorySearchQuery] = useState('');
@@ -170,19 +174,36 @@ const NewDeviceScreen = ({ navigation, route }) => {
     }, [])
   );
 
-  const getAllPositions = async () => {
+  /**
+   * 计算 0-239 位置列表 (含占用标记)
+   * 同步函数 — render 阶段必须能直接用, 不能是 async
+   */
+  const computePositions = async () => {
     const shelfId = await ShelfService.getCurrentShelfId();
     const occupied = await getOccupiedPositionMap(allDevices, shelfId);
-    const positions = [];
+    const list = [];
     for (let i = 0; i < 240; i++) {
-      positions.push({
+      list.push({
         position: i,
         isOccupied: occupied.has(i),
         deviceName: occupied.get(i) || '',
       });
     }
-    return positions;
+    return list;
   };
+
+  /**
+   * allDevices 变化时重新计算 positions 缓存
+   * 之前 render 时直接调 getAllPositions() — getAllPositions 是 async, 返回 Promise
+   * Promise.slice === undefined → 展开 bank 时崩 "TypeError: undefined is not a function"
+   */
+  useEffect(() => {
+    if (!allDevicesLoaded) return;
+    (async () => {
+      const list = await computePositions();
+      setPositions(list);
+    })();
+  }, [allDevicesLoaded, allDevices, state.location]);
 
   /**
    * 自动填充第一个空位置（与扫码上架一致）:
@@ -527,7 +548,7 @@ const NewDeviceScreen = ({ navigation, route }) => {
                   </TouchableOpacity>
                   {expandedBank === bankIndex && (
                     <View style={styles.positionGridInner}>
-                      {getAllPositions()
+                      {positions
                         .slice(bankIndex * 30, (bankIndex + 1) * 30)
                         .map((posInfo) => {
                           const isCurrent = state.location === String(posInfo.position);
