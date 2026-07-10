@@ -1184,7 +1184,7 @@ class StorageService {
         // 1.3.0: 含 shelves 列表 + currentShelfId + 库存-蓝牙记忆 (bluetoothMac / bluetoothName)
         // 关键: 必须是 1.3.0, 导入端才会在 importAllData 中还原库存列表与蓝牙绑定
         version: '1.3.0',
-        appVersion: '1.0.0',
+        appVersion: '1.2.3',
       };
     } catch (error) {
       logError('导出数据失败', error, 'StorageService.exportAllData');

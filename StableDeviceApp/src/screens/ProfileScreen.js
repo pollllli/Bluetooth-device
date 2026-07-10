@@ -68,7 +68,7 @@ const ProfileScreen = ({ navigation, route }) => {
   const handleAbout = () => {
     Alert.alert(
       '关于',
-      '器件管理系统 v1.0.0\n\n用于管理电子器件的库存和取用\n\n© 2026 器件管理系统'
+      '器件管理系统 v1.2.3\n\n用于管理电子器件的库存和取用\n\n© 2026 器件管理系统'
     );
   };
 
