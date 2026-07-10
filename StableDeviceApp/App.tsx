@@ -193,85 +193,10 @@ export default function App() {
     setPendingImportUri(url);
   };
 
-  // ============ 全局错误处理 - 启动时立刻注册, 防止崩溃丢错 ============
-  useEffect(() => {
-    const saveError = async (key: string, value: string) => {
-      try {
-        await AsyncStorage.setItem(key, value);
-      } catch (e) {
-        // ignore
-      }
-    };
-
-    // 1. 全局同步错误捕获
-    const originalHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
-    if ((global as any).ErrorUtils?.setGlobalHandler) {
-      (global as any).ErrorUtils.setGlobalHandler((error: Error, isFatal: boolean) => {
-        console.error('[GlobalHandler]', isFatal ? 'FATAL' : 'non-fatal', error);
-        saveError('@lastError', JSON.stringify({
-          type: 'global',
-          fatal: isFatal,
-          message: String(error?.message || error),
-          stack: String(error?.stack || ''),
-          time: new Date().toISOString(),
-        }));
-        if (originalHandler) originalHandler(error, isFatal);
-      });
-    }
-
-    // 2. Promise rejection 捕获
-    const tracking = require('promise/setimmediate/rejection-tracking');
-    if (tracking?.enable) {
-      tracking.enable({
-        allRejections: true,
-        onUnhandled: (id: number, error: any) => {
-          console.error('[UnhandledRejection]', id, error);
-          saveError('@lastError', JSON.stringify({
-            type: 'unhandledRejection',
-            id,
-            message: String(error?.message || error),
-            stack: String(error?.stack || ''),
-            time: new Date().toISOString(),
-          }));
-        },
-        onHandled: () => {},
-      });
-    }
-
-    // 3. console.error 自动捕获 (RedBox 在 release build 不显示, 这里兜底)
-    const originalConsoleError = console.error;
-    console.error = (...args: any[]) => {
-      try {
-        const message = args.map(a => {
-          if (a instanceof Error) return a.message + '\n' + a.stack;
-          try { return JSON.stringify(a); } catch { return String(a); }
-        }).join(' ');
-        if (message.includes('Warning:') === false && args.some(a => a instanceof Error)) {
-          saveError('@lastError', JSON.stringify({
-            type: 'consoleError',
-            message: message.substring(0, 2000),
-            time: new Date().toISOString(),
-          }));
-        }
-      } catch {}
-      originalConsoleError(...args);
-    };
-  }, []);
-
-  // ============ 启动时检查上次崩溃错误 ============
-  const [lastError, setLastError] = useState<string | null>(null);
-  useEffect(() => {
-    (async () => {
-      try {
-        const err = await AsyncStorage.getItem('@lastError');
-        if (err) setLastError(err);
-      } catch {}
-    })();
-  }, []);
-  const clearLastError = async () => {
-    await AsyncStorage.removeItem('@lastError');
-    setLastError(null);
-  };
+  // 全局错误处理已移除 (v1.2.2+):
+  // 旧的 console.error 拦截器 + AsyncStorage 持久化 + 启动弹窗 已全部取消
+  // 原因: 拦截器误把 ble-plx 正常断连/性能噪音记为崩溃, 用户体验极差
+  // 错误仍会通过 console.error 输出供开发调试, 但不再打扰终端用户
 
   useEffect(() => {
     // 冷启动：通过 VIEW/SEND Intent 启动 App 时获取 URI
@@ -318,12 +243,10 @@ export default function App() {
 
         // 经典蓝牙 (Android 11 及以下)
         const legacyBtPerms: string[] = [];
-        if ((PermissionsAndroid.PERMISSIONS as any).BLUETOOTH) {
-          legacyBtPerms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH);
-        }
-        if ((PermissionsAndroid.PERMISSIONS as any).BLUETOOTH_ADMIN) {
-          legacyBtPerms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADMIN);
-        }
+        const legacyBt = (PermissionsAndroid.PERMISSIONS as any).BLUETOOTH;
+        const legacyBtAdmin = (PermissionsAndroid.PERMISSIONS as any).BLUETOOTH_ADMIN;
+        if (legacyBt) legacyBtPerms.push(legacyBt);
+        if (legacyBtAdmin) legacyBtPerms.push(legacyBtAdmin);
 
         // 位置权限 (蓝牙扫描依赖, 兼容 Android 6-11)
         const locationPerm = PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION;
@@ -615,33 +538,6 @@ export default function App() {
       <SafeAreaView style={styles.container}>
         <UserProvider>
           <AppNavigator />
-
-        {/* 上次崩溃的错误信息（如果有） */}
-        {lastError && (
-          <Modal visible={!!lastError} transparent animationType="fade" onRequestClose={clearLastError}>
-            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 16 }}>
-              <View style={{ backgroundColor: 'white', borderRadius: 8, padding: 16, maxHeight: '80%' }}>
-                <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#d32f2f', marginBottom: 8 }}>
-                  ⚠️ 上次运行出现错误
-                </Text>
-                <Text style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
-                  请把以下信息截图发给开发者
-                </Text>
-                <ScrollView style={{ maxHeight: 360, backgroundColor: '#fff3e0', padding: 8, borderRadius: 4 }}>
-                  <Text style={{ fontSize: 11, fontFamily: 'monospace', color: '#333' }}>
-                    {lastError}
-                  </Text>
-                </ScrollView>
-                <TouchableOpacity
-                  style={{ backgroundColor: '#1976d2', padding: 12, borderRadius: 8, marginTop: 12, alignItems: 'center' }}
-                  onPress={clearLastError}
-                >
-                  <Text style={{ color: 'white', fontWeight: '600' }}>知道了</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </Modal>
-        )}
 
         {/* 外部应用分享 JSON 文件时的导入确认弹窗 */}
         <Modal
