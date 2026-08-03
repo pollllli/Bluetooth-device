@@ -8,7 +8,7 @@
  * - 分类管理入口
  * - 关于应用信息展示
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
+  ActivityIndicator,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';  // 文件选择器
 import * as FileSystem from 'expo-file-system/legacy';   // 文件系统操作
@@ -50,6 +51,9 @@ const ProfileScreen = ({ navigation, route }) => {
   const [exportSuccessInfo, setExportSuccessInfo] = useState(null);
   // 复制按钮反馈状态
   const [pathCopied, setPathCopied] = useState(false);
+  // 1.6.3: 导入进度弹窗 (替代原来只用 console.log 看不到进度的体验)
+  const [importProgress, setImportProgress] = useState(null); // {fileName, deviceCount, read, total} | null
+  const importCancelRef = useRef({ cancelled: false });
 
   /**
    * 组件挂载时初始化用户信息
@@ -269,7 +273,7 @@ const ProfileScreen = ({ navigation, route }) => {
     }
   };
 
-  // 数据导入 (新流程: 按文件名作为库存名, 同名覆盖/异名新增)
+  // 数据导入 (1.4 阶段 2: 流式导入, 200MB+ 文件不崩)
   const handleImportData = async () => {
     // 【重要】弹窗"数据导入"出现就清空当前库存的 BOM + 熄灭所有灯
     // 原因: 用户既然选择导入新数据, 当前库存的 BOM 状态(亮灯、组件列表)就必然会被废弃,
@@ -299,32 +303,70 @@ const ProfileScreen = ({ navigation, route }) => {
               const fileUri = result.assets[0].uri;
               // 关键: 优先用系统返回的文件名, 这样"按文件名判断"才有效
               const fileName = result.assets[0].name || 'imported.json';
-              const fileContent = await FileSystem.readAsStringAsync(fileUri);
-              const backupData = JSON.parse(fileContent);
 
-              // 用新的"按文件名导入"流程, 替代旧的"覆盖全部数据"
-              const importResult = await StorageService.importShelfFromFile(fileName, backupData);
+              // 1.6.3: 重置取消标志, 显示进度弹窗
+              importCancelRef.current.cancelled = false;
+              setImportProgress({ fileName, deviceCount: 0, read: 0, total: 0 });
+
+              // 1.4 阶段 2: 直接把 fileUri 喂给流式导入, 不预先 readAsStringAsync + JSON.parse
+              // 旧方案 41MB 文件要把整个 JSON 加载到内存再解析 (100MB+ 直接 OOM)
+              // 新方案走 fetch + arrayBuffer + 64KB 分块喂 StreamParser, 内存峰值 < 10MB
+              let importResult;
+              try {
+                importResult = await StorageService.streamImportShelfFromFile(
+                  fileUri,
+                  fileName,
+                  {
+                    onProgress: (p) => {
+                      if (p.phase === 'reading') {
+                        setImportProgress((prev) => prev ? {
+                          ...prev,
+                          deviceCount: p.deviceCount || 0,
+                          read: p.read || 0,
+                          total: p.total || 0,
+                        } : prev);
+                      }
+                    },
+                    isCancelled: () => importCancelRef.current.cancelled,
+                  }
+                );
+              } catch (importErr) {
+                setImportProgress(null);
+                // 取消是用户主动行为, 静默返回, 不弹错误
+                if (importErr?.message === '导入已取消') {
+                  console.log('[handleImportData] 用户取消导入');
+                  return;
+                }
+                throw importErr;
+              }
+              setImportProgress(null);
 
               // 导入完成后清空库存缓存, 重新加载
               ShelfService.clearShelvesCache();
 
               // 关键: 把"目标库存"绑定的蓝牙标记为待自动连
               // DeviceListScreen 获得焦点时会消费这个标记, 后台静默连, 不弹切库提示
-              if (importResult.bluetoothMac) {
-                setPendingAutoConnect(importResult.bluetoothMac, importResult.bluetoothName || '');
-                console.log('[handleImportData] 标记待自动连:', importResult.bluetoothMac, importResult.bluetoothName);
+              // streamImportShelfFromFile 返回 sourceBluetoothMac (新命名), 老 importShelfFromFile 返回 bluetoothMac
+              const mac = importResult.sourceBluetoothMac || importResult.bluetoothMac || '';
+              const bname = importResult.sourceBluetoothName || importResult.bluetoothName || '';
+              if (mac) {
+                setPendingAutoConnect(mac, bname);
+                console.log('[handleImportData] 标记待自动连:', mac, bname);
               }
 
               const actionLabel = importResult.action === 'add' ? '已新建' : '已覆盖';
+              const imageHint = importResult.restoredImageCount
+                ? `\n已恢复 ${importResult.restoredImageCount} 张图片`
+                : '';
               Alert.alert(
                 '导入成功',
-                `${actionLabel}库存「${importResult.shelfName}」`,
+                `${actionLabel}库存「${importResult.shelfName}」\n导入 ${importResult.deviceCount} 个器件${imageHint}`,
                 [
                   {
                     text: '确定',
                     onPress: () => {
                       // 跳到库存首页 (DeviceListTab 是 Tab.Navigator 的第一个 tab, 即默认 tab)
-                      // 切库动作在 importShelfFromFile 内部已完成, 这里只负责跳转 UI
+                      // 切库动作在 streamImportShelfFromFile 内部已完成, 这里只负责跳转 UI
                       navigation.reset({
                         index: 0,
                         routes: [
@@ -499,6 +541,70 @@ const ProfileScreen = ({ navigation, route }) => {
               >
                 <Text style={styles.successOkButtonText}>完成</Text>
               </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 1.6.3: 导入进度弹窗 (替代原来"看不到进度"的体验 + 真正的可取消) */}
+      <Modal
+        visible={!!importProgress}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          // Android 物理返回键: 视作用户取消
+          importCancelRef.current.cancelled = true;
+        }}
+      >
+        <View style={styles.importProgressOverlay}>
+          <View style={styles.importProgressContent}>
+            <Text style={styles.importProgressTitle}>导入数据</Text>
+            {/* 文件名 */}
+            {importProgress?.fileName ? (
+              <View style={styles.importProgressFileBox}>
+                <Text style={styles.importProgressFileLabel}>文件名</Text>
+                <Text style={styles.importProgressFileName} numberOfLines={1}>
+                  {importProgress.fileName}
+                </Text>
+              </View>
+            ) : null}
+            {/* 状态 + 进度条 */}
+            <View style={styles.importProgressStatusBox}>
+              <Text style={styles.importProgressStatusText}>导入中...</Text>
+              <Text style={styles.importProgressDeviceCount}>
+                已解析 {importProgress?.deviceCount || 0} 个器件
+              </Text>
+              {/* 跨平台进度条: 用 View 模拟, 不依赖 ProgressViewIOS / ProgressBar */}
+              <View style={styles.importProgressBarBg}>
+                <View
+                  style={[
+                    styles.importProgressBarFg,
+                    {
+                      width: `${
+                        importProgress?.total > 0
+                          ? Math.min(100, (importProgress.read / importProgress.total) * 100)
+                          : 0
+                      }%`,
+                    },
+                  ]}
+                />
+              </View>
+            </View>
+            {/* 按钮行: 取消 + spinner */}
+            <View style={styles.importProgressButtonRow}>
+              <TouchableOpacity
+                style={styles.importProgressCancelButton}
+                onPress={() => {
+                  // 设标志, streamImportShelfFromFile 下一次 checkCancel() 抛错
+                  importCancelRef.current.cancelled = true;
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.importProgressCancelButtonText}>取消</Text>
+              </TouchableOpacity>
+              <View style={styles.importProgressSpinnerBox}>
+                <ActivityIndicator size="small" color="#007AFF" />
+              </View>
             </View>
           </View>
         </View>
@@ -847,6 +953,95 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  // 1.6.3: 导入进度弹窗样式
+  importProgressOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  importProgressContent: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 20,
+    width: '100%',
+    maxWidth: 360,
+  },
+  importProgressTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  importProgressFileBox: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+  },
+  importProgressFileLabel: {
+    fontSize: 12,
+    color: '#6c757d',
+    marginBottom: 4,
+  },
+  importProgressFileName: {
+    fontSize: 14,
+    color: '#212529',
+    fontWeight: '500',
+  },
+  importProgressStatusBox: {
+    backgroundColor: '#e7f3ff',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  importProgressStatusText: {
+    fontSize: 14,
+    color: '#007AFF',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  importProgressDeviceCount: {
+    fontSize: 13,
+    color: '#495057',
+    marginBottom: 10,
+  },
+  importProgressBarBg: {
+    height: 6,
+    backgroundColor: '#d1e7ff',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  importProgressBarFg: {
+    height: '100%',
+    backgroundColor: '#007AFF',
+    borderRadius: 3,
+  },
+  importProgressButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  importProgressCancelButton: {
+    backgroundColor: '#e9ecef',
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  importProgressCancelButtonText: {
+    color: '#495057',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  importProgressSpinnerBox: {
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });
 

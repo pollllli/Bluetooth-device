@@ -15,7 +15,6 @@ import {
   TextInput,
   Alert,
   Modal,
-  FlatList,
   SafeAreaView,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
@@ -23,10 +22,10 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as XLSX from 'xlsx';
 import StorageService from '../services/StorageService';
 import ShelfService from '../services/ShelfService';
-import { logError, formatErrorMessage } from '../utils/ErrorHandler';
+import { logError } from '../utils/ErrorHandler';
 import * as pendingBomImport from '../utils/pendingBomImport';
 import { usePendingBomImport } from '../utils/pendingBomImport';
-import { emitLightAllOff, subscribe as subscribeLight } from '../utils/lightEvents';
+import { emitLightAllOff } from '../utils/lightEvents';
 import {
   subscribeLightStatus,
   getLitDeviceIdsSnapshot,
@@ -65,7 +64,10 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   const [pendingComponent, setPendingComponent] = useState(null);     // 等待上架的组件（暂存）
   const [expandedBank, setExpandedBank] = useState(null);      // 当前展开的排号（位置选择器中）
   const currentLitPosition = useRef(null);                     // 当前亮灯的物理位置（用于位置选择器预览）
-  const [currentShelfId, setCurrentShelfId] = useState('1');   // 当前选中库存 id (跟随 ShelfService)
+  const [currentShelfId, setCurrentShelfId] = useState(
+    // 立即同步从 cache 拿当前库存 id, 避免首次 render 用错的默认值
+    ShelfService.getCurrentShelfIdSync() || null
+  );
   const previewTimeout = useRef(null);                         // 预览灯自动熄灭定时器
   const isOperatingRef = useRef(false);                        // 操作锁，防止重复点击
 
@@ -85,9 +87,6 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   }, []);
 
   // ========== 切库自动清空已导入的 BOM ==========
-  // 用户切换到别的库存, 已导入的 BOM 列表就属于上一个库存的上下文了,
-  // 留着只会造成"明明切了库, 列表里却还是旧的 BOM"的混乱。
-  // 用 ref 记录上一次切到的库存, 跳过首次订阅的"立即触发"以免初次进入就把 BOM 清空。
   const prevShelfRef = useRef(null);
   useEffect(() => {
     let unsubscribe = null;
@@ -279,11 +278,21 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     if (!searchQuery || searchQuery.trim() === '') {
       setFilteredComponents(components);
     } else {
-      const query = searchQuery.toLowerCase();
-      const filtered = components.filter(
-        (component) =>
-          component.name && component.name.toLowerCase().includes(query)
-      );
+      const query = searchQuery.toLowerCase().trim();
+      const filtered = components.filter((component) => {
+        // 搜索字段: 名称 / 器件名称 / 供应商编号 / 封装 / 类目 / 位置
+        const fields = [
+          component.name,
+          component.deviceName,
+          component.supplierId,
+          component.package,
+          component.category,
+          component.location, // BOM 列表里的位置/序号
+        ];
+        return fields.some(
+          (v) => v != null && String(v).toLowerCase().includes(query)
+        );
+      });
       setFilteredComponents(filtered);
     }
   }, [components, searchQuery]);
@@ -325,7 +334,19 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
     // 各列对应的中文/英文关键词，用于自动匹配表头
     const sortOrderKeywords = ['序号', 'no', 'index', '#'];
-    const deviceNameKeywords = ['name', '器件名称', '名称', '器件', 'component', 'part', '型号'];
+    // 器件名称识别优先级 (按"用户最常用的列"排, 不是按字母排):
+    //   1) 明确的"名称"类列 (老表格默认, 如 "名称" / "器件名称" / "Component Name" / "型号")
+    //   2) Comment 列 — 部分嘉立创导出模板**直接用 Comment 字段当器件名称**导出,
+    //      且**不导出 Manufacturer Part 列**; 此时 Comment 必须能识别成名称
+    //   3) Manufacturer Part (无换行的精确匹配)
+    //   4) 'part' 兜底 — 防止 "Manufacturer\nPart" 含换行时漏匹配
+    //      (注意: 不能用 'manufacturer part' 兜底, 因为表头里换行把它拆开了)
+    const deviceNameKeywords = [
+      'name', '器件名称', '名称', '器件', 'component', '型号',
+      'comment',             // 部分表用 Comment 列作为器件名称 (不是参数名!)
+      'manufacturer part',   // 精确匹配 (无换行的表)
+      'part',                // 兜底: 含换行的 "Manufacturer\nPart"
+    ];
     const valueKeywords = ['值', 'value', '数值', '规格', '参数', '参数值'];
     const supplierIdKeywords = ['supplier', '供应商', '编号', '料号', 'partno', 'pn', '供应商编号', 'vendor'];
     const packageKeywords = ['封装', 'package', '封装形式', 'footprint'];
@@ -761,13 +782,13 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
   /**
    * 获取BOM组件与器件架中器件的匹配信息
-   * 匹配规则（按优先级）：
-   * 1. 供应商编号 + 器件名称 + 封装 都匹配
-   * 2. 仅供应商编号 + 封装匹配（无器件名称时）
-   * 3. 仅器件名称 + 封装匹配（无供应商编号时）
-   * 4. 编号都为空时，仅按器件名称 + 封装匹配
+   * 匹配规则(按优先级,任一命中即视为匹配):
+   * 1. 供应商编号匹配 (BOM 和库存都有编号时)
+   * 2. 器件名称匹配
+   * 注: 不再校验封装是否一致 — 扫码上架的器件经常没封装,
+   *     强行要求封装一致会导致"其实在库"的器件被误判成"未入库"。
    * @param {Object} component - BOM组件对象
-   * @returns {Object} 匹配结果，包含 exists（是否匹配）、devices（匹配到的器件列表）
+   * @returns {Object} 匹配结果,包含 exists(是否匹配)、devices(匹配到的器件列表)
    */
   const getDeviceMatchInfo = (component) => {
     console.log(`\n=== getDeviceMatchInfo 开始 ===`);
@@ -777,85 +798,45 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
     console.log(`组件封装: ${component.package}`);
 
     /**
-     * 检查封装是否匹配
-     * 比较时会去除前导零，如 "0805" 和 "805" 视为匹配
+     * 字符串归一化: trim + 大写, 处理空格和大小写差异
      */
-    const checkPackageMatch = (devicePackage, componentPackage) => {
-      if (!componentPackage || !devicePackage) return true;
-      const normalizedDevicePackage = devicePackage.replace(/^0+/, '');
-      const normalizedComponentPackage = componentPackage.replace(/^0+/, '');
-      return (
-        normalizedDevicePackage === normalizedComponentPackage ||
-        devicePackage === componentPackage
-      );
+    const normalize = (str) => {
+      if (!str) return '';
+      return String(str).trim().toUpperCase();
     };
 
     // 修复: BOM 匹配只看当前选中库存的器件, 而不是全部器件 (写死 '1' 的 bug)
+    // 规则简化: 不再要求封装一致 (扫码上架常没封装, 强行要求封装会导致误判)
+    // 只要 (编号匹配) 或 (名称匹配) 任一命中即视为匹配
     const matchedDevices = devices.filter((device, index) => {
       // 跳过非当前库存的器件
       if (device.shelfId !== currentShelfId) {
+        if (index < 3) {
+          console.log(
+            `  [跳过] 器件[${index}] "${device.name}" shelfId="${device.shelfId}" ≠ currentShelfId="${currentShelfId}"`
+          );
+        }
         return false;
       }
       console.log(`\n检查器件[${index}]: ${device.name}`);
       console.log(`  器件供应商编号: ${device.supplierId}`);
-      console.log(`  器件封装: ${device.package}`);
 
-      const compName = component.name || component.deviceName || '';
-      const compSupplierId = component.supplierId || '';
-      const devName = device.name || '';
-      const devSupplierId = device.supplierId || '';
+      // 字符串归一化(trim + 大写)
+      const compName = normalize(component.name || component.deviceName);
+      const compSupplierId = normalize(component.supplierId);
+      const devName = normalize(device.name);
+      const devSupplierId = normalize(device.supplierId);
 
-      // 规则1：供应商编号 + 器件名称 + 封装 都匹配
-      if (compSupplierId && devSupplierId && compName && devName) {
-        const supplierMatch = devSupplierId === compSupplierId;
-        const nameMatch = devName === compName;
-        console.log(
-          `  供应商编号匹配: ${supplierMatch}, 器件名称匹配: ${nameMatch}`
-        );
-        if (supplierMatch && nameMatch) {
-          const packageMatch = checkPackageMatch(
-            device.package,
-            component.package
-          );
-          console.log(`  封装匹配: ${packageMatch}`);
-          if (packageMatch) return true;
-        }
+      // 规则1: 供应商编号匹配 (BOM 和库存都有编号)
+      if (compSupplierId && devSupplierId && compSupplierId === devSupplierId) {
+        console.log(`  ✓ 供应商编号匹配: ${devSupplierId}`);
+        return true;
       }
 
-      // 规则2：仅供应商编号 + 封装匹配（BOM组件无器件名称时）
-      if (compSupplierId && devSupplierId && !compName) {
-        if (devSupplierId === compSupplierId) {
-          const packageMatch = checkPackageMatch(
-            device.package,
-            component.package
-          );
-          console.log(`  仅供应商编号匹配: true, 封装匹配: ${packageMatch}`);
-          if (packageMatch) return true;
-        }
-      }
-
-      // 规则3：仅器件名称 + 封装匹配（BOM组件无供应商编号时）
-      if (compName && devName && !compSupplierId) {
-        if (devName === compName) {
-          const packageMatch = checkPackageMatch(
-            device.package,
-            component.package
-          );
-          console.log(`  仅器件名称匹配: true, 封装匹配: ${packageMatch}`);
-          if (packageMatch) return true;
-        }
-      }
-
-      // 规则4：编号都为空时，仅按器件名称 + 封装匹配
-      if (!compSupplierId && !devSupplierId && compName && devName) {
-        if (devName === compName) {
-          const packageMatch = checkPackageMatch(
-            device.package,
-            component.package
-          );
-          console.log(`  编号都为空，名称匹配: true, 封装匹配: ${packageMatch}`);
-          if (packageMatch) return true;
-        }
+      // 规则2: 器件名称匹配
+      if (compName && devName && compName === devName) {
+        console.log(`  ✓ 器件名称匹配: ${devName}`);
+        return true;
       }
 
       return false;

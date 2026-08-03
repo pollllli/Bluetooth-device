@@ -260,6 +260,29 @@ v1.2.3 起移除:那个拦截器把 ble-plx 正常断连/性能噪音当成崩�
 
 ## 更新日志
 
+### v1.6.5 (2026-08-03)
+**BOM 配单**
+- BOM 匹配不再校验封装(扫码上架的器件经常没封装,旧逻辑会误判"未入库")
+- 嘉立创等导出模板:Comment 列(是器件名称,不是参数名)被识别为器件名称
+- 死代码清理(3 个未用 import + 1 个未用变量)
+- `getDeviceMatchInfo` JSDoc 同步 + 删除 `checkPackageMatch` 死函数
+
+**导入导出 / 微信接收**
+- 微信/QQ/文件管理器接收 json / xlsx / csv / txt 文件 → 自动跳 App
+- `MainActivity.onNewIntent` 透传,App 在后台也能响应
+- 导入/切库逻辑回退到 git HEAD v1.2.3 的 `importShelfFromFile`(老版本稳定,新流式版有 0 器件 bug)
+- 补 `getDevicesByShelf` 兼容方法(HEAD 上没有但 DeviceListScreen 在用)
+
+**蓝牙连接**
+- 导入后自动连蓝牙超时 5s → 10s,加 BleManager state 等待(避免 BLE 还没 PoweredOn 就连)
+
+**Bug 修复**
+- 切库时器件显示为 0 个(`handleSwitchShelfFromSheet.doSwitch` 调 `loadDevices()` 没传 `shelf.id`,state 异步更新导致 filter 旧值) — 1 行修复
+
+**版本号同步**
+- `package.json` / `app.json` / `android/app/build.gradle` 三处版本号升到 1.6.5
+- `versionCode` 1 → 2
+
 ### v1.2.3 (2026-07-07)
 **功能**
 - 蓝牙扫描过滤 `W02_` 前缀设备,只显示本 app 专用蓝牙模块

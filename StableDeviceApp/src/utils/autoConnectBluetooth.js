@@ -143,13 +143,44 @@ export async function autoConnectBluetooth(mac, name) {
     console.log('[autoConnectBluetooth] 已自创建 BluetoothHandler 实例');
   }
 
-  // 3) 调用底层连接 (带超时 5s, 防止心跳校验 / 设备不在范围时卡死)
-  //    5s 是用户要求的"蓝牙不在范围"判定阈值: 超过 5s 未连上, 视为目标不在范围
+  // 3) 连接前先确认 BleManager 完全就绪 (state = PoweredOn)
+  //    修复: 之前直接 race 5s 超时, 但 Android BLE 栈刚初始化需要 1-3 秒"热机"
+  //          加上 BLE GATT 连接 2-3 秒 + discoverAllServicesAndCharacteristics 2-3 秒,
+  //          总共 6-9 秒, 5s 必超时 → "目标蓝牙不在范围"误报
+  try {
+    if (handler && handler.manager && typeof handler.manager.state === 'function') {
+      const state = await handler.manager.state();
+      console.log('[autoConnectBluetooth] BleManager state =', state);
+      if (state !== 'PoweredOn') {
+        // 等最多 3 秒, 每 200ms 轮询一次, 看到 PoweredOn 就继续
+        const startWait = Date.now();
+        while (Date.now() - startWait < 3000) {
+          await new Promise(r => setTimeout(r, 200));
+          const s = await handler.manager.state();
+          if (s === 'PoweredOn') {
+            console.log('[autoConnectBluetooth] BleManager 已就绪 (等待', Date.now() - startWait, 'ms)');
+            break;
+          }
+          if (s === 'PoweredOff' || s === 'Unauthorized') {
+            console.warn('[autoConnectBluetooth] 蓝牙未开启或未授权, state=', s);
+            showToast('蓝牙未开启, 自动连接取消');
+            return { ok: false, reason: 'adapter_not_ready' };
+          }
+        }
+      }
+    }
+  } catch (stateErr) {
+    // state 查询失败不阻塞主流程, 继续尝试连接
+    console.warn('[autoConnectBluetooth] 查询 BleManager state 异常:', stateErr && stateErr.message);
+  }
+
+  // 4) 调用底层连接 (带超时 10s, 和 ConnectionScreen 保持一致)
+  //    修复: 之前是 5s 太短, 微信接收文件 → App 后台刚唤起 → BLE 栈需要 6-9 秒
   try {
     const connectWithTimeout = Promise.race([
       handler.connectToDevice(mac),
       new Promise(function (_, reject) {
-        setTimeout(function () { reject(new Error('连接超时 (5s)')); }, 5000);
+        setTimeout(function () { reject(new Error('连接超时 (10s)')); }, 10000);
       }),
     ]);
     await connectWithTimeout;

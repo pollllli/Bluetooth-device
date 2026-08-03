@@ -189,6 +189,25 @@ class StorageService {
   }
 
   /**
+   * 按库存 id 过滤器件 (DeviceListScreen 用的优化版)
+   * 之前 streamImport 工作区里别人加的方法, HEAD 上没有, 但 DeviceListScreen.loadDevices 在用
+   * 不补这个会"undefined is not a function" → "加载器件数据失败"
+   * 这里用兼容实现: 先 getDevices, 再按 shelfId 过滤 (HEAD getDevices 本身有 cache, 不会重复读)
+   * @param {string} shelfId
+   * @returns {Promise<Array>}
+   */
+  static async getDevicesByShelf(shelfId) {
+    if (!shelfId) return [];
+    try {
+      const all = await this.getDevices();
+      return Array.isArray(all) ? all.filter((d) => d && d.shelfId === shelfId) : [];
+    } catch (err) {
+      logError('按库存过滤器件失败', err, 'StorageService.getDevicesByShelf');
+      return [];
+    }
+  }
+
+  /**
    * 保存器件数据
    * @param {Array} devices - 器件数据数组
    * @returns {Promise<void>}

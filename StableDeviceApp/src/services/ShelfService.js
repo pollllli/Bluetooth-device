@@ -73,7 +73,7 @@ function _emitCurrentShelfChange(id) {
  * @param {(id: string) => void} cb
  * @returns {() => void} 取消订阅
  */
-export function subscribeCurrentShelf(cb) {
+export function subscribeCurrentShelf(cb) {  
   _currentShelfListeners.add(cb);
   getCurrentShelfId().then((id) => {
     if (_currentShelfListeners.has(cb)) cb(id);
@@ -187,11 +187,10 @@ export async function deleteShelf(id) {
   const target = list.find((s) => s.id === id);
   if (!target) throw new Error('库存不存在');
 
-  // 1. 删除该库存下所有器件
-  const allDevices = await StorageService.getDevices();
-  const remainingDevices = allDevices.filter((d) => d.shelfId !== id);
-  const deletedDeviceCount = allDevices.length - remainingDevices.length;
-  await StorageService.saveDevices(remainingDevices);
+  // 1. 删除该库存下所有器件 (SQLite + AsyncStorage 双清, 见 StorageService.deleteDevicesByShelf)
+  //    之前用 saveDevices(remainingDevices) 只清 AsyncStorage, SQLite 里的器件没删,
+  //    导致"库存页已空, 库存首页还能看到器件"的鬼影 bug
+  const { deletedCount: deletedDeviceCount } = await StorageService.deleteDevicesByShelf(id);
 
   // 2. 从库存列表里移除
   const next = list.filter((s) => s.id !== id);
@@ -200,12 +199,31 @@ export async function deleteShelf(id) {
   _emitShelfChange(next);
 
   // 3. 如果删的是当前选中, 切到第一个
+  //    【关键】next 可能为空 (用户删掉了最后一个库存), 此时不要调 setCurrentShelfId,
+  //    否则 next[0]=undefined, setCurrentShelfId 内部 next[0].id 抛 TypeError
+  //    修复前: 删最后一个库 → 弹 "Cannot read property 'id' of undefined"
+  //    修复后: 删最后一个库 → 静默清掉 currentShelfId, 库存页显示 0 库存
   const current = await getCurrentShelfId();
   if (current === id) {
-    await setCurrentShelfId(next[0].id);
+    if (next.length > 0) {
+      await setCurrentShelfId(next[0].id);
+    } else {
+      // 0 库存: 清掉当前选中 (不传 id, 直接清)
+      try { await removeData(CURRENT_SHELF_KEY); } catch (e) { /* ignore */ }
+      _currentShelfIdCache = null;
+    }
   }
 
   return { deletedDeviceCount, name: target.name };
+}
+
+/**
+ * 同步读取当前选中库存 ID (仅返回 cache, 不会触发 AsyncStorage 读取)
+ * 用于页面初始化时立即拿到值, 避免首次 render 用错默认值
+ * @returns {string|null} cache 里的当前库存 ID, 没有就是 null
+ */
+export function getCurrentShelfIdSync() {
+  return _currentShelfIdCache;
 }
 
 /**
@@ -361,10 +379,20 @@ export async function getCurrentShelf() {
 }
 
 /**
- * 统计指定库存下的器件数
+ * 统计指定库存下的器件数 (1.4 阶段 1: 走 SQL COUNT)
  * @param {string} id
  */
 export async function getShelfDeviceCount(id) {
+  if (!id) return 0;
+  // 优先走 SQL, 失败/不可用时回退老逻辑
+  try {
+    const StorageService = require('./StorageService');
+    if (StorageService && typeof StorageService.getShelfDeviceCount === 'function') {
+      return await StorageService.getShelfDeviceCount(id);
+    }
+  } catch (e) {
+    console.warn('[ShelfService] getShelfDeviceCount SQL 失败, 降级:', e?.message);
+  }
   const allDevices = await StorageService.getDevices();
   return allDevices.filter((d) => d.shelfId === id).length;
 }
@@ -418,6 +446,7 @@ export default {
   renameShelf,
   deleteShelf,
   getCurrentShelfId,
+  getCurrentShelfIdSync,
   setCurrentShelfId,
   getCurrentShelf,
   getShelfDeviceCount,

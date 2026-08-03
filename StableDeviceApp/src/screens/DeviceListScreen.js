@@ -306,7 +306,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       const currentSearchQuery = searchQuery;
 
       // 每次焦点都重新加载当前库存和库存列表 (用户在设置页可能切了/改了库存)
-      (async () => {
+      // 关键: 先 await 拿到最新 currentId, 再用它调 loadDevices ——
+      // 因为 dispatch 是异步的, 同步紧跟的 loadDevices(state) 拿到的还是旧 shelfId
+      // 用 override 参数把最新值直接传进去, 避免导入后第一帧就查到错库
+      ;(async () => {
         try {
           const [shelves, currentId] = await Promise.all([
             ShelfService.getShelves(),
@@ -314,12 +317,15 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           ]);
           dispatch({ type: 'SET_SHELVES', payload: shelves });
           dispatch({ type: 'SET_CURRENT_SHELF_ID', payload: currentId });
+          // 1.4 阶段 2 修复: 关键 — 用刚拿到的 currentId 同步重载器件
+          // (之前用 state.currentShelfId 是旧的, 切库后第一帧会查错库, 看不到刚导入的)
+          await loadDevices(currentId);
         } catch (err) {
           console.warn('加载库存列表失败', err);
+          // 失败也要至少重载, 否则"导入后切到新库"会显示空
+          loadDevices();
         }
       })();
-
-      loadDevices();
 
       // 关键: 页面 focus 时主动拉一次 litStatusStore 的 snapshot 同步本地 state
       // 兜底 emit 错过 / 跨页面 mount 时机竞态 (问题 1 的根因)
@@ -539,33 +545,41 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     [saveSearchHistory, dispatch]
   );
 
-  const loadDevices = useCallback(async () => {
+  // loadDevices 接收可选 shelfId 参数, 调用方可在拿到"最新 currentShelfId"后直接传进来
+  // 不传则用 state.currentShelfId (注意: state 是异步更新, 同一 render 里 dispatch 后立刻读还是旧值)
+  const loadDevices = useCallback(async (overrideShelfId) => {
     try {
       dispatch({ type: 'SET_LOADING', payload: true });
-      // 先尝试从存储中读取数据
-      const storedDevices = await StorageService.getDevices();
+      // 1.4 阶段 1+: 优先按当前库存走 SQL 查 (只返回该 shelf 的器件, 不全读)
+      // 1.4 阶段 2: 流式导入后器件在 SQLite, 走 SQL 一定能看到; 老路径 (无 currentShelfId) 走 getDevices
+      const shelfId = overrideShelfId || currentShelfId;
+      let storedDevices = [];
+      if (shelfId) {
+        storedDevices = await StorageService.getDevicesByShelf(shelfId);
+      } else {
+        storedDevices = await StorageService.getDevices();
+      }
 
       if (storedDevices.length > 0) {
-        // 检查是否是旧的默认数据，如果是则清除
-        const isOldDefaultData =
-          storedDevices.length >= 10 && storedDevices[0]?.name?.includes('10Ω');
-        if (isOldDefaultData) {
-          console.log('检测到旧的默认数据，正在清除...');
-          await StorageService.saveDevices([]);
-          dispatch({ type: 'SET_DEVICES', payload: [] });
-        } else {
-          // 如果存储中有数据，使用存储的数据
-          console.log('从存储加载器件数据，共', storedDevices.length, '个器件');
-          const sortedDevices = [...storedDevices].sort((a, b) => {
-            const posA = (a.location != null && a.location !== '') ? parseInt(a.location, 10) : 9999;
-            const posB = (b.location != null && b.location !== '') ? parseInt(b.location, 10) : 9999;
-            if (isNaN(posA) && isNaN(posB)) return 0;
-            if (isNaN(posA)) return 1;
-            if (isNaN(posB)) return -1;
-            return posA - posB;
-          });
-          dispatch({ type: 'SET_DEVICES', payload: sortedDevices });
-        }
+        // 1.6.3: 删除"老默认数据"自动清除逻辑
+        // 原因: 老检查 `length >= 10 && first.name.includes('10Ω')` 太松,
+        //   真实数据只要第一个器件是 10Ω 电阻就误判, 触发 deleteDevicesByShelf 全删
+        //   用户反馈: 3 个库存连蓝牙后器件全部消失就是这个 bug
+        // 老默认数据是 v0.x 的 demo, 现在所有真实用户都是从老版本升上来, 不可能还有 demo
+        // 如果真有 demo 数据, 让用户手动删; 不要再替用户做删除决定
+        console.log('从存储加载器件数据，共', storedDevices.length, '个器件');
+        const sortedDevices = [...storedDevices].sort((a, b) => {
+          const posA = (a.location != null && a.location !== '') ? parseInt(a.location, 10) : 9999;
+          const posB = (b.location != null && b.location !== '') ? parseInt(b.location, 10) : 9999;
+          if (isNaN(posA) && isNaN(posB)) return 0;
+          if (isNaN(posA)) return 1;
+          if (isNaN(posB)) return -1;
+          return posA - posB;
+        });
+        dispatch({ type: 'SET_DEVICES', payload: sortedDevices });
+      } else {
+        // 没有任何器件 (刚切到空库 / 刚导入但还没 SQL 同步), 显式置空
+        dispatch({ type: 'SET_DEVICES', payload: [] });
       }
     } catch (error) {
       logError('加载器件数据失败', error, 'DeviceListScreen.loadDevices');
@@ -574,7 +588,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
-  }, [dispatch]);
+  }, [dispatch, currentShelfId]);
 
   const handleDeviceTagPress = useCallback(
     async (device, hardwarePosition) => {
@@ -708,7 +722,10 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           await ShelfService.setCurrentShelfId(shelf.id);
           dispatch({ type: 'SET_CURRENT_SHELF_ID', payload: shelf.id });
           setShowShelfSheet(false);
-          loadDevices();
+          // 【修复 v1.6.5】必须把 shelf.id 显式传给 loadDevices,
+          // 否则内部用 state.currentShelfId, 而 dispatch 是异步的,
+          // loadDevices 立即读 state 拿到的是旧值 → filter 旧值 → 0 个器件
+          loadDevices(shelf.id);
         };
 
         // 路径 1: 目标库存已绑定蓝牙 → 默认自动连, 失败才弹 [取消 / 手动选择] 弹窗
