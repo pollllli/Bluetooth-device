@@ -20,6 +20,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Modal,
+  ToastAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
@@ -112,11 +113,26 @@ const NewDeviceScreen = ({ navigation, route }) => {
   };
 
   const sendLightCommand = async (type, position) => {
-    if (!global.deviceConnection || !global.deviceConnection.handler) return;
+    if (!global.deviceConnection || !global.deviceConnection.handler) {
+      return { success: false, message: '未连接蓝牙' };
+    }
     try {
-      await global.deviceConnection.handler.sendCommand({ type, lightId: position });
+      const result = await global.deviceConnection.handler.sendCommand({ type, lightId: position });
+      return result || { success: true };
     } catch (error) {
       console.log('灯光指令发送失败:', error);
+      return { success: false, message: error?.message || '发送失败' };
+    }
+  };
+
+  /**
+   * 显示一行文字提示 (无弹窗, 用 Toast, 1.5s 后自动消失)
+   */
+  const showHint = (message) => {
+    if (Platform.OS === 'android') {
+      ToastAndroid.show(message, ToastAndroid.SHORT);
+    } else {
+      Alert.alert('提示', message);
     }
   };
 
@@ -175,14 +191,15 @@ const NewDeviceScreen = ({ navigation, route }) => {
   );
 
   /**
-   * 计算 0-239 位置列表 (含占用标记)
+   * 计算 0-299 位置列表 (含占用标记)
    * 同步函数 — render 阶段必须能直接用, 不能是 async
    */
   const computePositions = async () => {
     const shelfId = await ShelfService.getCurrentShelfId();
     const occupied = await getOccupiedPositionMap(allDevices, shelfId);
     const list = [];
-    for (let i = 0; i < 240; i++) {
+    // 300 位置 (10 排 × 30) = 单库存容量上限, 跟 utils/positionUtils.DEFAULT_MAX 同步
+    for (let i = 0; i < 300; i++) {
       list.push({
         position: i,
         isOccupied: occupied.has(i),
@@ -217,7 +234,7 @@ const NewDeviceScreen = ({ navigation, route }) => {
       if (!allDevicesLoaded) return;             // 还在加载, 跳过
       if (state.location) return;                // 用户已选, 跳过
       const shelfId = await ShelfService.getCurrentShelfId();
-      const empty = findFirstEmptyPosition(allDevices, shelfId, 90);
+      const empty = findFirstEmptyPosition(allDevices, shelfId);
       if (empty == null) return;                 // 满架, 保持空让用户选
       // 自动分配第一个空位 + 自动生成编号
       const newSupplierId = generateSupplierId(empty);
@@ -235,23 +252,35 @@ const NewDeviceScreen = ({ navigation, route }) => {
 
   /**
    * 选中位置后：更新位置 + 自动生成 supplierId
+   *
+   * 流程 (跟 ScanScreen 一致):
+   *   1. 发 lightOn 试亮新位置
+   *   2. 试亮成功 → 关闭选择器, 保存位置
+   *   3. 试亮失败 → Toast 文字提示, 留在选择器
    */
   const handleSelectPosition = async (position) => {
+    // 亮灯提示新位置
+    if (global.deviceConnection && global.deviceConnection.handler) {
+      if (currentLitPosition.current !== null) {
+        try {
+          await sendLightCommand('lightOff', currentLitPosition.current);
+        } catch (e) { /* ignore */ }
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      const result = await sendLightCommand('lightOn', position);
+      if (!result || result.success === false) {
+        // 下位机无响应 → Toast 文字提示, 不关闭选择器
+        showHint(`位置 ${position} 不可存, 请更换`);
+        return;
+      }
+      currentLitPosition.current = position;
+    }
+
     const supplierId = generateSupplierId(position);
     dispatch({
       type: 'SET_FIELDS',
       payload: { location: String(position), supplierId },
     });
-
-    // 亮灯提示新位置
-    if (global.deviceConnection && global.deviceConnection.handler) {
-      if (currentLitPosition.current !== null) {
-        await sendLightCommand('lightOff', currentLitPosition.current);
-        await new Promise(resolve => setTimeout(resolve, 300));
-      }
-      await sendLightCommand('lightOn', position);
-      currentLitPosition.current = position;
-    }
     setShowPositionPicker(false);
   };
 
@@ -533,7 +562,7 @@ const NewDeviceScreen = ({ navigation, route }) => {
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>选择存放位置</Text>
             <ScrollView style={styles.positionGrid}>
-              {Array.from({ length: 8 }, (_, bankIndex) => (
+              {Array.from({ length: 10 }, (_, bankIndex) => (
                 <View key={bankIndex}>
                   <TouchableOpacity
                     style={styles.positionBankHeader}

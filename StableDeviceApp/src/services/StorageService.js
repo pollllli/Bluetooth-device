@@ -17,6 +17,22 @@ import { getCategories as getEffectiveCategories } from './DeviceCategoryService
 import { getShelves, getCurrentShelfId } from './ShelfService';
 import * as FileSystem from 'expo-file-system/legacy';
 
+// 1.4 阶段 1: SQLite 走 database.js
+// 延迟加载 (jest 环境 expo-sqlite 是 ESM 解析失败, 静态 import 会让测试加载就崩)
+// 真实 RN 环境: 第一次调用时 require, 缓存住
+let _DB = null;
+function getDB() {
+  if (_DB !== null) return _DB;
+  try {
+    // eslint-disable-next-line global-require
+    _DB = require('./database');
+  } catch (e) {
+    console.warn('[StorageService] database.js 加载失败, 降级为全读 AsyncStorage:', e?.message);
+    _DB = false;
+  }
+  return _DB || null;
+}
+
 // 导入的图片保存目录 (app 沙盒内, 跨设备可移植)
 const IMAGES_DIR = `${FileSystem.documentDirectory}images/`;
 
@@ -121,7 +137,20 @@ class StorageService {
       const cached = this.#getFromCache('devices');
       if (cached) return cached;
 
-      // 从持久化存储获取
+      // 1.4 阶段 1+: 优先走 SQLite (流式导入写这里, 切库/搜索都读这里)
+      // 失败/不可用时才回退到 AsyncStorage (老 addDevice / saveDevices 还在写那里)
+      const db = getDB();
+      if (db && typeof db.getAllDevices === 'function') {
+        try {
+          const devices = await db.getAllDevices();
+          this.#setToCache('devices', devices);
+          return devices;
+        } catch (sqlErr) {
+          console.warn('[getDevices] SQLite 读失败, 降级到 AsyncStorage:', sqlErr?.message);
+        }
+      }
+
+      // 降级: 从持久化存储获取
       let devices = await getData('devices', []);
 
       // 修复已存在的无效 id（NaN、字符串等）
@@ -209,12 +238,31 @@ class StorageService {
 
   /**
    * 保存器件数据
+   * 1.6.5 修复 v164 的 bug: 同时写 SQLite 和 AsyncStorage
+   *   之前 v164 只写 AsyncStorage, 但 getDevices 优先读 SQLite → 重启后新增/修改的器件丢失
+   *   现在双写: SQLite 是主存储 (流式导入/查询都用它), AsyncStorage 是兜底备份
+   *   replaceAllDevices 内部带事务, 原子全量替换, 1万条 < 1s
    * @param {Array} devices - 器件数据数组
    * @returns {Promise<void>}
    */
   static async saveDevices(devices) {
     try {
-      await saveData('devices', devices);
+      // 1) 主存储: SQLite 全量替换 (原子, 带事务)
+      const db = getDB();
+      if (db && typeof db.replaceAllDevices === 'function') {
+        try {
+          await db.replaceAllDevices(devices || []);
+        } catch (sqlErr) {
+          console.warn('[saveDevices] SQLite 写失败, 仅写 AsyncStorage:', sqlErr?.message);
+        }
+      }
+      // 2) 兜底备份: AsyncStorage (不阻塞, 失败也不影响 SQLite 已写入的数据)
+      try {
+        await saveData('devices', devices);
+      } catch (asyncErr) {
+        console.warn('[saveDevices] AsyncStorage 写失败 (SQLite 已成功, 不影响):', asyncErr?.message);
+      }
+      // 3) 更新内存缓存
       this.#setToCache('devices', devices);
     } catch (error) {
       logError('保存设备数据失败', error, 'StorageService.saveDevices');
@@ -1101,7 +1149,200 @@ class StorageService {
   }
 
   /**
-   * 导出所有数据
+   * 1.6.5: 流式导出单个库存到文件 (内存峰值 < 10MB, 300+ 器件+图片也不崩)
+   *
+   * 设计:
+   *   - 元数据 (shelves/categories/...) 一次性 JSON.stringify 写入 (总量小, < 100KB)
+   *   - devices 数组逐个处理: 读图 → JSON.stringify(device) → 追加写文件 → 释放 base64
+   *   - 每 BATCH_WRITE 个 device 合并成一次 writeAsStringAsync, 减少 IO 次数
+   *   - 不再 JSON.stringify(整个 backup), 也不再 writeAsStringAsync(整个文件)
+   *
+   * 内存峰值估算 (300 器件, 平均 200KB 图):
+   *   - 1 个 device JSON ≈ 270KB (base64 占大头)
+   *   - BATCH_WRITE=20 → 缓冲区 5MB
+   *   - 元数据 < 100KB
+   *   - 合计 < 6MB (旧方案 300+MB)
+   *
+   * @param {string} shelfId - 要导出的库存 id
+   * @param {string} filePath - 目标文件路径 (documentDirectory 下)
+   * @param {object} [hooks]
+   * @param {(p: {phase: string, current: number, total: number, message?: string}) => void} [hooks.onProgress]
+   * @returns {Promise<{filePath, deviceCount, embeddedImageCount, failedImageCount, summary}>}
+   */
+  static async streamExportShelfToFile(shelfId, filePath, hooks = {}) {
+    if (!shelfId) throw new Error('shelfId 不能为空');
+    if (!filePath) throw new Error('filePath 不能为空');
+    const { onProgress } = hooks;
+    const emit = (p) => { try { onProgress && onProgress(p); } catch (e) { /* ignore */ } };
+
+    try {
+      emit({ phase: 'prepare', current: 0, total: 0, message: '准备导出...' });
+
+      // 1) 收集元数据 (全部是小数据, 一次性拿)
+      let categories = null;
+      try { categories = await getEffectiveCategories(); } catch (e) {
+        console.warn('[streamExport] 获取类目失败:', e?.message);
+      }
+      let shelves = [];
+      try { shelves = await getShelves(); } catch (e) {
+        console.warn('[streamExport] 获取库存列表失败:', e?.message);
+      }
+      let currentShelfId = null;
+      try { currentShelfId = await getCurrentShelfId(); } catch (e) { /* ignore */ }
+      let lastConnectedDevice = null;
+      try { lastConnectedDevice = await this.getLastConnectedDevice(); } catch (e) { /* ignore */ }
+
+      // 2) 拿指定库存的器件 (优先 SQLite 按需查询, 不全量加载)
+      const db = getDB();
+      let devices;
+      if (db && typeof db.getDevicesByShelf === 'function') {
+        try {
+          devices = await db.getDevicesByShelf(shelfId);
+        } catch (e) {
+          console.warn('[streamExport] SQLite 查询失败, 降级全量读:', e?.message);
+          const all = await this.getDevices();
+          devices = all.filter((d) => d && d.shelfId === shelfId);
+        }
+      } else {
+        const all = await this.getDevices();
+        devices = all.filter((d) => d && d.shelfId === shelfId);
+      }
+
+      // 1.6.7: 过滤掉 null/undefined 器件, 防止 continue 导致批次计数错乱
+      const validDevices = devices.filter((d) => d && typeof d === 'object');
+      const skippedCount = devices.length - validDevices.length;
+      if (skippedCount > 0) {
+        console.warn(`[streamExport] 过滤掉 ${skippedCount} 个无效器件`);
+      }
+      devices = validDevices;
+
+      console.log(`[streamExport] 库存 ${shelfId} 共 ${devices.length} 个器件, 开始流式写入 ${filePath}`);
+      emit({ phase: 'writing', current: 0, total: devices.length, message: '开始写入...' });
+
+      // 3) 删除已存在的文件 (writeAsStringAsync 默认是覆盖, 但显式删更安全)
+      try { await FileSystem.deleteAsync(filePath, { idempotent: true }); } catch (e) { /* ignore */ }
+
+      // 4) 写文件头 + 元数据 (一次性写, 量小)
+      //    注意: 必须和 exportAllData 的输出格式严格一致, 这样接收端的 streamImport 才能解析
+      const exportDate = new Date().toISOString();
+      const headerParts = [];
+      headerParts.push('{');
+      headerParts.push(`"version":"1.3.0",`);
+      headerParts.push(`"appVersion":"1.2.3",`);
+      headerParts.push(`"exportDate":${JSON.stringify(exportDate)},`);
+      headerParts.push('"data":{');
+      headerParts.push(`"_filteredShelfId":${JSON.stringify(shelfId)},`);
+      headerParts.push(`"shelves":${JSON.stringify(shelves)},`);
+      headerParts.push(`"currentShelfId":${JSON.stringify(currentShelfId)},`);
+      headerParts.push(`"lastConnectedDevice":${JSON.stringify(lastConnectedDevice)},`);
+      headerParts.push(`"categories":${JSON.stringify(categories)},`);
+      headerParts.push('"devices":[');
+      await FileSystem.writeAsStringAsync(filePath, headerParts.join('\n'));
+
+      // 5) 逐个写 device (核心优化: base64 读完就写, 写完就释放)
+      //    1.6.7: 每个 device 包 try-catch, 单个器件出错不中断整个导出
+      const BATCH_WRITE = 20;
+      let embeddedImageCount = 0;
+      let failedImageCount = 0;
+      let writtenCount = 0;
+      let buffer = '';
+      let firstDevice = true;
+
+      for (let i = 0; i < devices.length; i++) {
+        const device = devices[i];
+
+        try {
+          // 5.1) 单独读图 (一次性, 读完立刻 stringify 释放)
+          let imgB64 = null;
+          if (device.image) {
+            imgB64 = await this.#readImageAsBase64(device.image);
+            if (imgB64) {
+              embeddedImageCount++;
+            } else {
+              failedImageCount++;
+            }
+          }
+
+          // 5.2) 构造要写入的对象 (不污染原 device)
+          const devToWrite = { ...device };
+          if (imgB64) {
+            devToWrite._imageBase64 = imgB64;
+          }
+
+          // 5.3) JSON.stringify 单个 device, 累积到 buffer
+          const prefix = firstDevice ? '' : ',';
+          const jsonStr = JSON.stringify(devToWrite);
+          if (jsonStr && jsonStr.length > 2) {  // 至少是 "{}"
+            buffer += prefix + jsonStr;
+            firstDevice = false;
+            writtenCount++;
+          }
+
+          // 5.4) 释放 base64 引用 (让 GC 可以回收)
+          devToWrite._imageBase64 = null;
+          imgB64 = null;
+        } catch (devErr) {
+          // 1.6.7: 单个器件处理失败不中断整个导出, 记录并继续
+          console.warn(`[streamExport] 器件 ${i} 处理失败, 跳过:`, devErr?.message || devErr);
+          failedImageCount++;
+        }
+
+        // 5.5) 每 BATCH_WRITE 个 device 写一次文件
+        if ((i + 1) % BATCH_WRITE === 0) {
+          if (buffer) {
+            await FileSystem.writeAsStringAsync(filePath, buffer, { append: true });
+            buffer = '';
+          }
+          emit({
+            phase: 'writing',
+            current: i + 1,
+            total: devices.length,
+            message: `已导出 ${i + 1}/${devices.length}`,
+          });
+        }
+      }
+
+      // 6) flush 剩余 buffer (必须在 try 内, 确保不丢数据)
+      if (buffer) {
+        await FileSystem.writeAsStringAsync(filePath, buffer, { append: true });
+        buffer = '';
+      }
+
+      // 1.6.7: 验证写入数量, 如果不匹配则警告
+      if (writtenCount !== devices.length) {
+        console.warn(`[streamExport] 警告: 加载 ${devices.length} 个, 实际写入 ${writtenCount} 个`);
+      }
+
+      // 7) 写文件尾
+      const footer = ']}\n}\n';
+      await FileSystem.writeAsStringAsync(filePath, footer, { append: true });
+
+      // 8) 统计 (1.6.7: 用 writtenCount 而非 devices.length, 反映实际写入数)
+      const summary = {
+        deviceCount: writtenCount,
+        embeddedImageCount,
+        failedImageCount,
+        isCustomCategories: Array.isArray(categories) && categories.length > 0,
+      };
+
+      emit({
+        phase: 'done',
+        current: writtenCount,
+        total: devices.length,
+        message: `导出完成: ${writtenCount} 个器件, ${embeddedImageCount} 张图片`,
+      });
+
+      console.log(`[streamExport] 完成: ${writtenCount}/${devices.length} 个器件已写入, ${embeddedImageCount} 张图片, ${failedImageCount} 张失败`);
+
+      return { filePath, deviceCount: writtenCount, embeddedImageCount, failedImageCount, summary };
+    } catch (error) {
+      logError('流式导出失败', error, 'StorageService.streamExportShelfToFile');
+      throw error;
+    }
+  }
+
+  /**
+   * 导出所有数据 (旧版同步导出, 保留兼容, 小数据量 < 50 个器件时仍可用)
    * @param {Object} [options] - 导出选项
    * @param {string} [options.shelfId] - 只导出指定库存的器件（按 shelfId 过滤），不传则导出全部
    * @returns {Promise<Object>} 包含所有数据的备份对象
@@ -1377,7 +1618,388 @@ class StorageService {
   }
 
   /**
-   * 从文件导入单个库存 (新流程)
+   * 1.6.5: 流式导入 (内存峰值 < 10MB, 200MB+ 文件也不崩)
+   * 直接 fetch + arrayBuffer + 64KB 分块喂 StreamParser, 边解析边批量 INSERT 到 SQLite
+   * 图片处理 fire-and-forget (单行 UPDATE 回写), 不阻塞主流程
+   *
+   * @param {string} sourceUri - content:// 或 file:// 源 URI
+   * @param {string} fileName - 文件名 (用于决定目标库存名)
+   * @param {object} [hooks]
+   * @param {(p: {phase: string, deviceCount: number, read: number, total?: number, message?: string}) => void} [hooks.onProgress]
+   * @param {() => boolean} [hooks.isCancelled] - 返回 true 时取消导入
+   * @returns {Promise<{shelfId, shelfName, isNew, action, deviceCount, restoredImageCount, failedImageCount, mergedCategoryCount, sourceBluetoothMac, sourceBluetoothName}>}
+   */
+  static async streamImportShelfFromFile(sourceUri, fileName, hooks = {}) {
+    if (!sourceUri) throw new Error('导入源 URI 为空');
+    const { onProgress, isCancelled } = hooks;
+    const checkCancel = () => {
+      if (isCancelled && isCancelled()) {
+        throw new Error('导入已取消');
+      }
+    };
+    const emit = (p) => { try { onProgress && onProgress(p); } catch (e) { /* ignore */ } };
+    const { StreamParser, streamFetchChunked, STATE } = require('../utils/streamJsonImport');
+
+    let cleanup = null;
+    // 1.6.6: 暴露到 try 外, 用于取消时清理已写入的部分器件
+    let targetShelfIdOuter = null;
+    let dbOuter = null;
+    let actionOuter = null;
+    try {
+      // ===== 0) 导入前先断旧蓝牙链路 (避免灯残留) =====
+      try {
+        const conn = (typeof global !== 'undefined') ? global.deviceConnection : null;
+        if (conn && conn.handler && typeof conn.handler.disconnect === 'function') {
+          console.log('[streamImport] 导入前先断开旧蓝牙链路, 强制灭旧库存灯');
+          await conn.handler.disconnect();
+        }
+      } catch (discErr) {
+        console.warn('[streamImport] 导入前断旧蓝牙失败 (不阻塞):', discErr?.message || discErr);
+      }
+
+      // ===== 1) 准备 shelves (解析 filename → 决定 add/overwrite, 拿到 targetShelfId) =====
+      const localShelvesRaw = await getData('shelves', null);
+      const localShelves = Array.isArray(localShelvesRaw) ? localShelvesRaw : [];
+
+      let rawName = (fileName || '').toString();
+      try { rawName = decodeURIComponent(rawName); } catch (e) { /* ignore */ }
+      rawName = rawName.split(/[\\/]/).pop() || rawName;
+      rawName = rawName.replace(/\.json$/i, '').trim();
+      const targetShelfName = rawName || '导入的库存';
+
+      const existing = localShelves.find((s) => s && s.name === targetShelfName);
+      let targetShelfId;
+      let isNew;
+      let action;
+      if (existing) {
+        targetShelfId = existing.id;
+        isNew = false;
+        action = 'overwrite';
+      } else {
+        targetShelfId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        isNew = true;
+        action = 'add';
+      }
+      // 1.6.6: 暴露到外层 try, 用于取消时清理
+      targetShelfIdOuter = targetShelfId;
+      actionOuter = action;
+      console.log('[streamImport] 目标库存:', targetShelfName, 'id=', targetShelfId, 'action=', action);
+
+      emit({ phase: 'prepare', deviceCount: 0, read: 0, message: '准备导入...' });
+
+      // 1.1 覆盖场景: 先删目标 shelf 下的旧器件
+      const db = getDB();
+      dbOuter = db;
+      if (action === 'overwrite' && db && typeof db.deleteDevicesByShelf === 'function') {
+        try {
+          await db.deleteDevicesByShelf(targetShelfId);
+          console.log('[streamImport] 已清空目标库存旧器件:', targetShelfId);
+        } catch (e) {
+          console.warn('[streamImport] 清空旧器件失败, 继续:', e?.message);
+        }
+      }
+
+      emit({ phase: 'reading', deviceCount: 0, read: 0, message: '打开文件...' });
+
+      // ===== 2) 准备 parser + onDevice 批写逻辑 =====
+      let sourceBluetoothMac = '';
+      let sourceBluetoothName = '';
+      let deviceCount = 0;
+      let restoredImageCount = 0;
+      let failedImageCount = 0;
+      let lastProgressEmit = 0;
+      const BATCH_SIZE = 500;
+      const IMAGE_PARALLEL = 10;
+      let batch = [];
+      let inflight = null;
+      let inflightDone = null;
+      let imageSem = { active: 0, queue: [] };
+      let imageWriteCounter = 0;
+
+      // 单 device 图片处理: base64 → 沙盒 file://, 并发限 IMAGE_PARALLEL
+      const processImage = (device) => {
+        if (imageSem.active < IMAGE_PARALLEL) {
+          imageSem.active++;
+          return runImageTask(device);
+        }
+        return new Promise((resolve) => {
+          imageSem.queue.push(() => runImageTask(device).then(resolve));
+        });
+      };
+      const runImageTask = async (device) => {
+        try {
+          const counter = ++imageWriteCounter;
+          const shelfTag = String(device.shelfId || 'noshelf').replace(/[^a-zA-Z0-9_]/g, '_');
+          const fname = `${shelfTag}_img${counter}_${Math.random().toString(36).slice(2, 6)}.jpg`;
+          const fileUri = await this.#writeBase64AsImage(device._imageBase64, fname);
+          if (fileUri) {
+            device.image = fileUri;
+            restoredImageCount++;
+            // 写完沙盒后, 单行 UPDATE 把 image 写回 SQLite
+            if (db && typeof db.updateDeviceImage === 'function' && device.id != null) {
+              try {
+                await db.updateDeviceImage(device.id, fileUri);
+              } catch (e) {
+                console.warn('[streamImport] updateDeviceImage 失败:', e?.message);
+              }
+            }
+          } else {
+            device.image = '';
+            failedImageCount++;
+          }
+          delete device._imageBase64;
+        } catch (e) {
+          console.warn('[streamImport] 图片处理失败:', e?.message);
+          device.image = '';
+          failedImageCount++;
+          delete device._imageBase64;
+        } finally {
+          imageSem.active--;
+          if (imageSem.queue.length > 0) {
+            const next = imageSem.queue.shift();
+            next();
+          }
+        }
+      };
+
+      // 批量 INSERT (remap id 避免 UNIQUE 冲突)
+      const flushBatch = async () => {
+        if (batch.length === 0) return;
+        const toInsert = batch;
+        batch = [];
+        if (db && typeof db.remapAndInsertDevices === 'function') {
+          try {
+            await db.remapAndInsertDevices(toInsert);
+          } catch (e) {
+            console.error('[streamImport] batch INSERT 失败:', e?.message, 'batch.length=', toInsert.length);
+            throw e;
+          }
+        } else if (db && typeof db.insertDevices === 'function') {
+          try {
+            await db.insertDevices(toInsert);
+          } catch (e) {
+            console.error('[streamImport] batch INSERT 失败:', e?.message, 'batch.length=', toInsert.length);
+            throw e;
+          }
+        } else {
+          // 无 SQLite 时降级: 走 saveDevices (会写 AsyncStorage)
+          const all = await this.getDevices();
+          const others = all.filter((d) => d && d.shelfId !== targetShelfId);
+          await this.saveDevices([...others, ...toInsert]);
+        }
+      };
+
+      const waitInflight = () => {
+        if (!inflight) return Promise.resolve();
+        if (!inflightDone) {
+          inflightDone = new Promise((resolve) => {
+            inflight.then(() => resolve(), () => resolve());
+          });
+        }
+        return inflightDone;
+      };
+
+      const waitQueueDrained = async () => {
+        // 1.6.6: 在等待 parser 收尾期间持续检查取消标志,
+        //   这样用户点"取消"后能在 5ms 内中断, 不用等 60s 超时
+        //   同时定期 emit 进度, 让 UI 显示"正在解析数据..."而不是卡住
+        const deadline = Date.now() + 60000;
+        let lastEmit = 0;
+        while (parser.state !== STATE.DONE && Date.now() < deadline) {
+          checkCancel();
+          const now = Date.now();
+          if (now - lastEmit > 200) {
+            lastEmit = now;
+            emit({ phase: 'parsing', deviceCount, read: xhrTotal, total: xhrTotal, message: '正在解析数据...' });
+          }
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        await waitInflight();
+      };
+
+      const parser = new StreamParser({
+        onDevice: (device, idx) => {
+          if (!device) return;
+          checkCancel();
+          if (device._imageBase64) {
+            processImage(device);
+          }
+          device.shelfId = targetShelfId;
+          batch.push(device);
+          deviceCount = idx + 1;
+          if (batch.length >= BATCH_SIZE && !inflight) {
+            inflight = flushBatch().finally(() => {
+              inflight = null;
+              inflightDone = null;
+            });
+          }
+        },
+        onProgress: () => { /* ignore */ },
+      });
+
+      // ===== 3) fetch + 手动分块喂 parser =====
+      let xhrTotal = 0;
+      let lastDebugLog = 0;
+      let lastCancelCheck = 0;
+      const chunkResult = await streamFetchChunked(sourceUri, {
+        onProgress: (p) => {
+          xhrTotal = p.total || 0;
+          const now = Date.now();
+          if (now - lastProgressEmit > 200) {
+            lastProgressEmit = now;
+            emit({ phase: 'reading', deviceCount, read: p.read, total: p.total });
+          }
+          if (now - lastCancelCheck > 200) {
+            lastCancelCheck = now;
+            try { checkCancel(); } catch (e) { throw e; }
+          }
+          if (now - lastDebugLog > 2000) {
+            lastDebugLog = now;
+            const pendingImg = imageSem.active + imageSem.queue.length;
+            console.log(
+              `[streamImport] 进度: read=${p.read}/${p.total} deviceCount=${deviceCount} parser.deviceIndex=${parser.deviceIndex} state=${parser.state} batch=${batch.length} pendingImg=${pendingImg} restoredImg=${restoredImageCount}`
+            );
+          }
+        },
+        onChunk: (delta) => {
+          // 1.6.6: 每段 chunk 喂入前检查取消, 让用户在大文件解析过程中也能即时中断
+          checkCancel();
+          try { parser.feed(delta); } catch (e) {
+            console.warn('[streamImport] parser.feed 失败:', e?.message);
+          }
+        },
+        onEnd: () => {
+          try { parser.end(); } catch (e) {
+            console.warn('[streamImport] parser.end 失败:', e?.message);
+          }
+        },
+      });
+      checkCancel();
+      xhrTotal = chunkResult.totalBytes || xhrTotal;
+      console.log(
+        `[streamImport] fetch+分块完成: totalBytes=${xhrTotal} deviceCount=${deviceCount} parser.deviceIndex=${parser.deviceIndex} state=${parser.state}`
+      );
+
+      // 3.1 等待 device queue 排空 + flush 最后一个 batch
+      await waitQueueDrained();
+      await flushBatch();
+
+      // 3.2 拿 shelves meta (从 parser.meta 里取)
+      const backupShelves = Array.isArray(parser.meta?.shelves) ? parser.meta.shelves : [];
+      const sourceShelf = backupShelves.find((s) => s && s.name === targetShelfName) || backupShelves[0] || {};
+      sourceBluetoothMac = sourceShelf.bluetoothMac || '';
+      sourceBluetoothName = sourceShelf.bluetoothName || '';
+      console.log(
+        `[streamImport] 流式解析完成: deviceCount=${deviceCount} restoredImage=${restoredImageCount} failedImage=${failedImageCount} shelves=${backupShelves.length}`
+      );
+
+      emit({ phase: 'devices-done', deviceCount, read: xhrTotal, message: `已导入 ${deviceCount} 个器件` });
+
+      // ===== 4) 写 shelves =====
+      if (action === 'overwrite') {
+        const ex = localShelves.find((s) => s && s.id === targetShelfId);
+        if (ex && sourceBluetoothMac) {
+          ex.bluetoothMac = sourceBluetoothMac;
+          ex.bluetoothName = sourceBluetoothName;
+        }
+      } else {
+        const newShelf = { id: targetShelfId, name: targetShelfName };
+        if (sourceBluetoothMac) {
+          newShelf.bluetoothMac = sourceBluetoothMac;
+          newShelf.bluetoothName = sourceBluetoothName;
+        }
+        localShelves.push(newShelf);
+      }
+      await saveData('shelves', localShelves);
+      try {
+        const ShelfService = require('./ShelfService');
+        if (ShelfService && typeof ShelfService.notifyShelfChanged === 'function') {
+          ShelfService.notifyShelfChanged(localShelves);
+        }
+      } catch (e) { /* ignore */ }
+
+      // ===== 5) 切 currentShelfId =====
+      try {
+        const ShelfService = require('./ShelfService');
+        if (ShelfService && typeof ShelfService.clearShelvesCache === 'function') {
+          ShelfService.clearShelvesCache();
+        }
+        if (ShelfService && typeof ShelfService.setCurrentShelfId === 'function') {
+          await ShelfService.setCurrentShelfId(targetShelfId);
+        } else {
+          await saveData('currentShelfId', targetShelfId);
+        }
+      } catch (e) {
+        logError('setCurrentShelfId 失败, 降级到 saveData', e, 'StorageService.streamImportShelfFromFile');
+        await saveData('currentShelfId', targetShelfId);
+      }
+
+      // ===== 6) 清缓存 =====
+      this.#clearCache('devices');
+      this.#clearCache(`shelf:${targetShelfId}`);
+
+      // ===== 7) 合并类目 (取并集, 不覆盖本地) =====
+      let mergedCategoryCount = 0;
+      try {
+        const backupCategories = parser.meta?.categories;
+        if (Array.isArray(backupCategories) && backupCategories.length > 0) {
+          const mergeRes = await this.mergeCategoriesFromBackup(backupCategories);
+          mergedCategoryCount = mergeRes.added;
+        }
+      } catch (catErr) {
+        logError('合并类目失败', catErr, 'StorageService.streamImportShelfFromFile');
+      }
+
+      // ===== 8) 清理临时文件 =====
+      if (cleanup) {
+        try { await cleanup(); } catch (e) { /* ignore */ }
+        cleanup = null;
+      }
+
+      emit({ phase: 'done', deviceCount, read: xhrTotal, message: '导入完成' });
+
+      return {
+        shelfId: targetShelfId,
+        shelfName: targetShelfName,
+        isNew,
+        action,
+        deviceCount,
+        restoredImageCount,
+        failedImageCount,
+        mergedCategoryCount,
+        sourceBluetoothMac,
+        sourceBluetoothName,
+      };
+    } catch (error) {
+      if (cleanup) {
+        try { await cleanup(); } catch (e) { /* ignore */ }
+      }
+      // 1.6.6: 用户取消时清理已写入的部分器件, 避免留下半截数据
+      if (error?.message === '导入已取消' && targetShelfIdOuter) {
+        console.log('[streamImport] 用户取消, 清理已写入的部分器件, shelfId=', targetShelfIdOuter);
+        try {
+          if (dbOuter && typeof dbOuter.deleteDevicesByShelf === 'function') {
+            await dbOuter.deleteDevicesByShelf(targetShelfIdOuter);
+          } else {
+            // 降级: 从 AsyncStorage 删除
+            const all = await this.getDevices();
+            const remaining = all.filter((d) => d && d.shelfId !== targetShelfIdOuter);
+            await this.saveDevices(remaining);
+          }
+          this.#clearCache('devices');
+          this.#clearCache(`shelf:${targetShelfIdOuter}`);
+          console.log('[streamImport] 部分器件已清理');
+        } catch (cleanErr) {
+          console.warn('[streamImport] 清理部分器件失败:', cleanErr?.message || cleanErr);
+        }
+      }
+      logError('流式导入失败', error, 'StorageService.streamImportShelfFromFile');
+      throw error;
+    }
+  }
+
+  /**
+   * 从文件导入单个库存 (旧版同步导入, 保留兼容, 小文件 < 2MB 仍可用)
    *
    * 设计目标: 多次从微信导入时, 不会覆盖其他库存, 而是在已有基础上添加
    *

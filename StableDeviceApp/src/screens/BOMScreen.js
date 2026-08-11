@@ -49,7 +49,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
    * litDeviceIds: 当前已亮灯的器件ID列表（用于高亮显示）
    * showPositionPicker: 是否显示位置选择弹窗（用于上架未匹配的器件）
    * pendingComponent: 等待上架的组件（暂存，选择位置后使用）
-   * expandedBank: 当前展开的排号（位置选择器中，共8排）
+   * expandedBank: 当前展开的排号（位置选择器中，共10排）
    * currentLitPosition: 当前亮灯的物理位置（用于位置选择器预览）
    * previewTimeout: 预览灯自动熄灭定时器
    * isOperatingRef: 操作锁，防止重复点击（避免并发操作问题）
@@ -969,13 +969,13 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
   };
 
   /**
-   * 获取所有位置信息（0-239，共240个位置，分8排）
+   * 获取所有位置信息（0-299，共300个位置，分10排）
    * @returns {Array} 位置信息数组，每项包含 position、isOccupied、deviceName
    */
   const getAllPositions = () => {
     const occupied = getOccupiedPositions();
     const positions = [];
-    for (let i = 0; i < 240; i++) {
+    for (let i = 0; i < 300; i++) {
       positions.push({
         position: i,
         isOccupied: occupied.has(i),
@@ -1413,7 +1413,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
             )}
             {/* 位置网格，分8排展示，每排30个位置 */}
             <ScrollView style={styles.positionGrid}>
-              {Array.from({ length: 8 }, (_, bankIndex) => (
+              {Array.from({ length: 10 }, (_, bankIndex) => (
                 <View key={bankIndex}>
                   {/* 排号标题，可折叠展开 */}
                   <TouchableOpacity

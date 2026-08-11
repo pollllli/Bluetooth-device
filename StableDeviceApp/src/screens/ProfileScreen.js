@@ -54,6 +54,8 @@ const ProfileScreen = ({ navigation, route }) => {
   // 1.6.3: 导入进度弹窗 (替代原来只用 console.log 看不到进度的体验)
   const [importProgress, setImportProgress] = useState(null); // {fileName, deviceCount, read, total} | null
   const importCancelRef = useRef({ cancelled: false });
+  // 1.6.5: 流式导出进度 (300+ 器件导出可能要十几秒, 给用户进度反馈)
+  const [exportProgress, setExportProgress] = useState(null); // {current, total, shelfName, message, shelfIndex, shelfTotal} | null
 
   /**
    * 组件挂载时初始化用户信息
@@ -114,16 +116,48 @@ const ProfileScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 把 exportList 写到 documentDirectory 临时目录, 返回 [{documentPath, fileName}, ...]
-   * 注意: 不写到 Download, 分享完 / 关闭时统一清理
+   * 1.6.5: 流式导出单个库存到 documentDirectory 临时文件
+   * 替代旧的 writeTempExportFiles (那个会 JSON.stringify(整个 backup) 导致大库存 OOM)
+   *
+   * @param {Array} selectedShelves - 选中的库存对象数组
+   * @param {(p: {current: number, total: number, shelfName: string, message?: string}) => void} [onProgress]
+   * @returns {Promise<Array<{documentPath, fileName, deviceCount, embeddedImageCount}>>}
    */
-  const writeTempExportFiles = async (exportList) => {
+  const streamExportTempFiles = async (selectedShelves, onProgress) => {
     const tempFiles = [];
-    for (const item of exportList) {
-      const json = JSON.stringify(item.backup, null, 2);
-      const documentPath = `${FileSystem.documentDirectory}${item.fileName}`;
-      await FileSystem.writeAsStringAsync(documentPath, json);
-      tempFiles.push({ documentPath, fileName: item.fileName });
+    for (let i = 0; i < selectedShelves.length; i++) {
+      const shelf = selectedShelves[i];
+      const safeName = (shelf.name || '未命名库存')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim() || '未命名库存';
+      const fileName = `${safeName}.json`;
+      const documentPath = `${FileSystem.documentDirectory}${fileName}`;
+
+      const result = await StorageService.streamExportShelfToFile(
+        shelf.id,
+        documentPath,
+        {
+          onProgress: (p) => {
+            if (onProgress) {
+              onProgress({
+                current: p.current || 0,
+                total: p.total || 0,
+                shelfName: shelf.name || safeName,
+                message: p.message || '',
+                shelfIndex: i + 1,
+                shelfTotal: selectedShelves.length,
+              });
+            }
+          },
+        }
+      );
+
+      tempFiles.push({
+        documentPath,
+        fileName,
+        deviceCount: result.deviceCount,
+        embeddedImageCount: result.embeddedImageCount,
+      });
     }
     return tempFiles;
   };
@@ -158,8 +192,11 @@ const ProfileScreen = ({ navigation, route }) => {
 
     let tempFiles = [];
     try {
-      const exportList = await StorageService.exportShelves(selected);
-      tempFiles = await writeTempExportFiles(exportList);
+      // 1.6.5: 流式导出 (不再 JSON.stringify 整个 backup, 300+ 器件也不崩)
+      tempFiles = await streamExportTempFiles(selected, (p) => {
+        setExportProgress(p);
+      });
+      setExportProgress(null);
       if (tempFiles.length === 0) {
         Alert.alert('错误', '没有可分享的文件');
         return;
@@ -179,6 +216,7 @@ const ProfileScreen = ({ navigation, route }) => {
         UTI: ext === 'json' ? 'public.json' : undefined,
       });
     } catch (err) {
+      setExportProgress(null);
       logError('分享失败', err, 'ProfileScreen.handleShareFromExportModal');
       Alert.alert('错误', `分享失败: ${err.message || '请重试'}`);
     } finally {
@@ -239,24 +277,26 @@ const ProfileScreen = ({ navigation, route }) => {
     setShowExportModal(false);
 
     try {
-      // 1. 一次性生成 N 份 JSON 对象
-      const exportList = await StorageService.exportShelves(selected);
+      // 1.6.5: 流式导出 (不再 JSON.stringify 整个 backup, 300+ 器件也不崩)
+      //   旧方案: exportShelves 一次性把所有 device + base64 装进 JS 堆 → JSON.stringify → writeAsStringAsync
+      //   新方案: streamExportShelfToFile 逐个读图、写完即释放, 内存峰值 < 10MB
+      const tempFiles = await streamExportTempFiles(selected, (p) => {
+        setExportProgress(p);
+      });
+      setExportProgress(null);
 
-      // 2. 写入下载目录 + 收集中间文件路径
+      // 2. 复制到下载目录 + 收集中间文件路径
       const writtenFiles = [];
-      for (const item of exportList) {
-        const json = JSON.stringify(item.backup, null, 2);
-        const documentPath = `${FileSystem.documentDirectory}${item.fileName}`;
-        await FileSystem.writeAsStringAsync(documentPath, json);
+      for (const f of tempFiles) {
         try {
-          await ExpoEasyFs.copyFileToDownload(documentPath, item.fileName);
+          await ExpoEasyFs.copyFileToDownload(f.documentPath, f.fileName);
         } catch (e) {
-          console.warn(`写入下载目录失败: ${item.fileName}`, e);
+          console.warn(`写入下载目录失败: ${f.fileName}`, e);
         }
         writtenFiles.push({
-          documentPath,
-          fileName: item.fileName,
-          deviceCount: item.backup?.summary?.deviceCount || 0,
+          documentPath: f.documentPath,
+          fileName: f.fileName,
+          deviceCount: f.deviceCount || 0,
         });
       }
 
@@ -268,6 +308,7 @@ const ProfileScreen = ({ navigation, route }) => {
           : `Download/ (共 ${writtenFiles.length} 个文件)`,
       });
     } catch (error) {
+      setExportProgress(null);
       logError('导出多库存数据失败', error, 'ProfileScreen.handleExportData');
       Alert.alert('错误', `导出失败: ${error.message || '请重试'}`);
     }
@@ -306,7 +347,7 @@ const ProfileScreen = ({ navigation, route }) => {
 
               // 1.6.3: 重置取消标志, 显示进度弹窗
               importCancelRef.current.cancelled = false;
-              setImportProgress({ fileName, deviceCount: 0, read: 0, total: 0 });
+              setImportProgress({ fileName, deviceCount: 0, read: 0, total: 0, phase: 'prepare', message: '准备导入...' });
 
               // 1.4 阶段 2: 直接把 fileUri 喂给流式导入, 不预先 readAsStringAsync + JSON.parse
               // 旧方案 41MB 文件要把整个 JSON 加载到内存再解析 (100MB+ 直接 OOM)
@@ -318,14 +359,43 @@ const ProfileScreen = ({ navigation, route }) => {
                   fileName,
                   {
                     onProgress: (p) => {
-                      if (p.phase === 'reading') {
-                        setImportProgress((prev) => prev ? {
-                          ...prev,
-                          deviceCount: p.deviceCount || 0,
-                          read: p.read || 0,
-                          total: p.total || 0,
-                        } : prev);
-                      }
+                      // 1.6.6: 处理所有阶段 (reading/parsing/devices-done/done),
+                      //   老代码只处理 'reading', 导致文件读完后进度条卡住不动
+                      setImportProgress((prev) => {
+                        if (!prev) return prev;
+                        if (p.phase === 'reading') {
+                          return {
+                            ...prev,
+                            phase: 'reading',
+                            deviceCount: p.deviceCount || 0,
+                            read: p.read || 0,
+                            total: p.total || 0,
+                            message: '正在读取文件...',
+                          };
+                        }
+                        if (p.phase === 'parsing') {
+                          // 文件已读完, 正在解析; 进度条保持 100%, 状态文字变化
+                          return {
+                            ...prev,
+                            phase: 'parsing',
+                            deviceCount: p.deviceCount || 0,
+                            read: prev.total || 0,
+                            total: prev.total || 0,
+                            message: '正在解析数据...',
+                          };
+                        }
+                        if (p.phase === 'devices-done' || p.phase === 'done') {
+                          return {
+                            ...prev,
+                            phase: p.phase,
+                            deviceCount: p.deviceCount || 0,
+                            read: prev.total || 0,
+                            total: prev.total || 0,
+                            message: p.message || (p.phase === 'done' ? '导入完成' : '正在保存数据...'),
+                          };
+                        }
+                        return prev;
+                      });
                     },
                     isCancelled: () => importCancelRef.current.cancelled,
                   }
@@ -568,27 +638,59 @@ const ProfileScreen = ({ navigation, route }) => {
                 </Text>
               </View>
             ) : null}
-            {/* 状态 + 进度条 */}
-            <View style={styles.importProgressStatusBox}>
-              <Text style={styles.importProgressStatusText}>导入中...</Text>
+            {/* 1.6.7: 进度区域 - 白底 + 高对比度进度条, 不再用浅蓝色背景淹没进度条 */}
+            <View style={styles.importProgressSection}>
+              {/* 第一行: 状态文字 (左) + 百分比 (右) */}
+              <View style={styles.importProgressHeaderRow}>
+                <Text style={styles.importProgressStatusText}>
+                  {importProgress?.message || '导入中...'}
+                </Text>
+                <Text style={styles.importProgressPercentText}>
+                  {(() => {
+                    const phase = importProgress?.phase;
+                    if (phase === 'done') return '100%';
+                    if (phase === 'devices-done') return '98%';
+                    if (phase === 'parsing') {
+                      const devCount = importProgress?.deviceCount || 0;
+                      return `${Math.min(95, 60 + Math.round(devCount * 0.4))}%`;
+                    }
+                    if (phase === 'reading' && importProgress?.total > 0) {
+                      return `${Math.round((importProgress.read / importProgress.total) * 60)}%`;
+                    }
+                    return '0%';
+                  })()}
+                </Text>
+              </View>
+              {/* 进度条可视化 - 使用 View 实现, 不复用旧的 Unicode 文字方块版本 */}
+              {(() => {
+                const phase = importProgress?.phase;
+                let pct = 0;
+                if (phase === 'done') {
+                  pct = 100;
+                } else if (phase === 'devices-done') {
+                  pct = 98;
+                } else if (phase === 'parsing') {
+                  const devCount = importProgress?.deviceCount || 0;
+                  pct = Math.min(95, 60 + devCount * 0.4);
+                } else if (phase === 'reading' && importProgress?.total > 0) {
+                  pct = (importProgress.read / importProgress.total) * 60;
+                }
+                const clamped = Math.max(0, Math.min(100, pct));
+                return (
+                  <View style={styles.importProgressBarTrack}>
+                    <View
+                      style={[
+                        styles.importProgressBarFill,
+                        { width: `${clamped}%` },
+                      ]}
+                    />
+                  </View>
+                );
+              })()}
+              {/* 器件数 */}
               <Text style={styles.importProgressDeviceCount}>
                 已解析 {importProgress?.deviceCount || 0} 个器件
               </Text>
-              {/* 跨平台进度条: 用 View 模拟, 不依赖 ProgressViewIOS / ProgressBar */}
-              <View style={styles.importProgressBarBg}>
-                <View
-                  style={[
-                    styles.importProgressBarFg,
-                    {
-                      width: `${
-                        importProgress?.total > 0
-                          ? Math.min(100, (importProgress.read / importProgress.total) * 100)
-                          : 0
-                      }%`,
-                    },
-                  ]}
-                />
-              </View>
             </View>
             {/* 按钮行: 取消 + spinner */}
             <View style={styles.importProgressButtonRow}>
@@ -602,6 +704,48 @@ const ProfileScreen = ({ navigation, route }) => {
               >
                 <Text style={styles.importProgressCancelButtonText}>取消</Text>
               </TouchableOpacity>
+              <View style={styles.importProgressSpinnerBox}>
+                <ActivityIndicator size="small" color="#007AFF" />
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 1.6.5: 流式导出进度弹窗 (300+ 器件导出可能要十几秒) */}
+      <Modal
+        visible={!!exportProgress}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => { /* 导出不可取消, 等待完成 */ }}
+      >
+        <View style={styles.importProgressOverlay}>
+          <View style={styles.importProgressContent}>
+            <Text style={styles.importProgressTitle}>导出数据</Text>
+            <View style={styles.importProgressSection}>
+              <View style={styles.importProgressHeaderRow}>
+                <Text style={styles.importProgressStatusText}>
+                  {exportProgress?.shelfName || '导出中...'}
+                </Text>
+                <Text style={styles.importProgressPercentText}>
+                  {exportProgress?.total > 0
+                    ? `${Math.min(100, Math.round((exportProgress.current / exportProgress.total) * 100))}%`
+                    : '0%'}
+                </Text>
+              </View>
+              {(() => {
+                const pct = exportProgress?.total > 0
+                  ? Math.min(100, (exportProgress.current / exportProgress.total) * 100)
+                  : 0;
+                const filled = Math.round(pct / 5);
+                const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, 20 - filled));
+                return <Text style={styles.importProgressBarText}>{bar}</Text>;
+              })()}
+              <Text style={styles.importProgressDeviceCount}>
+                {exportProgress?.message || `已导出 ${exportProgress?.current || 0}/${exportProgress?.total || 0} 个器件`}
+              </Text>
+            </View>
+            <View style={styles.importProgressButtonRow}>
               <View style={styles.importProgressSpinnerBox}>
                 <ActivityIndicator size="small" color="#007AFF" />
               </View>
@@ -991,33 +1135,57 @@ const styles = StyleSheet.create({
     color: '#212529',
     fontWeight: '500',
   },
-  importProgressStatusBox: {
-    backgroundColor: '#e7f3ff',
-    borderRadius: 8,
-    padding: 12,
+  // 1.6.7: 进度区域 - 透明背景 (用弹窗白底), 不再用浅蓝色淹没进度条
+  importProgressSection: {
     marginBottom: 16,
+  },
+  // 1.6.7: 状态文字 + 百分比在同一行 (左状态, 右百分比)
+  importProgressHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
   },
   importProgressStatusText: {
     fontSize: 14,
-    color: '#007AFF',
-    fontWeight: '600',
-    marginBottom: 4,
+    color: '#495057',
+    fontWeight: '500',
+    flexShrink: 1,
   },
   importProgressDeviceCount: {
     fontSize: 13,
-    color: '#495057',
-    marginBottom: 10,
+    color: '#6c757d',
+    marginTop: 8,
   },
-  importProgressBarBg: {
-    height: 6,
-    backgroundColor: '#d1e7ff',
-    borderRadius: 3,
+  // 1.6.7: 文字进度条样式 - 用 Unicode 方块字符, 不用 View
+  importProgressBarText: {
+    fontSize: 16,
+    color: '#007AFF',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+    marginTop: 6,
+    marginBottom: 2,
+  },
+  // 进度条可视化 - View 实现 (track + fill), 不复用旧的 Unicode 文字方块版本
+  importProgressBarTrack: {
+    height: 8,
+    backgroundColor: '#e9ecef',
+    borderRadius: 4,
     overflow: 'hidden',
+    marginBottom: 6,
   },
-  importProgressBarFg: {
+  importProgressBarFill: {
     height: '100%',
     backgroundColor: '#007AFF',
-    borderRadius: 3,
+    borderRadius: 4,
+  },
+  // 1.6.7: 百分比文字 - 大号加粗, 右对齐
+  importProgressPercentText: {
+    fontSize: 18,
+    color: '#007AFF',
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    marginLeft: 8,
   },
   importProgressButtonRow: {
     flexDirection: 'row',

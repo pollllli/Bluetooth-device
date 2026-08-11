@@ -249,12 +249,19 @@ const ScanScreen = ({ navigation, route }) => {
   };
 
   // 发送灯光指令（亮灯/熄灯）到蓝牙设备
+  // 返回 { success, message } 让调用方判断 BLE 写是否成功
+  // success=true:  下位机接受了命令 (用户能直接看到灯亮)
+  // success=false: BLE 写失败 (下位机无响应 / 蓝牙断 / 特征不可写) → 该位置不可存
   const sendLightCommand = async (type, position) => {
-    if (!global.deviceConnection || !global.deviceConnection.handler) return;
+    if (!global.deviceConnection || !global.deviceConnection.handler) {
+      return { success: false, message: '未连接蓝牙' };
+    }
     try {
-      await global.deviceConnection.handler.sendCommand({ type, lightId: position });
+      const result = await global.deviceConnection.handler.sendCommand({ type, lightId: position });
+      return result || { success: true };  // 没返回值视为成功
     } catch (error) {
       console.log('灯光指令发送失败:', error);
+      return { success: false, message: error?.message || '发送失败' };
     }
   };
 
@@ -285,7 +292,7 @@ const ScanScreen = ({ navigation, route }) => {
       StorageService.getDevices(),
       ShelfService.getCurrentShelfId(),
     ]);
-    return findFirstEmptyPositionFromUtils(devices, shelfId, 90);
+    return findFirstEmptyPositionFromUtils(devices, shelfId);
   };
 
   /**
@@ -300,11 +307,11 @@ const ScanScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 获取所有位置信息（0-239，共240个位置，分8排，每排30个）
+   * 获取所有位置信息（0-299，共300个位置，分10排，每排30个）
    */
   const getAllPositions = () => {
     const positions = [];
-    for (let i = 0; i < 240; i++) {
+    for (let i = 0; i < 300; i++) {
       positions.push({
         position: i,
         isOccupied: occupiedPositions.has(i),
@@ -522,13 +529,22 @@ const ScanScreen = ({ navigation, route }) => {
 
       // 点亮第一个空位置的指示灯（先熄灭之前亮着的灯）
       if (currentLitPosition.current !== null) {
-        await sendLightCommand('lightOff', currentLitPosition.current);
-        await new Promise(resolve => setTimeout(resolve, 300)); // 等待熄灯完成
+        try {
+          await sendLightCommand('lightOff', currentLitPosition.current);
+        } catch (e) { /* ignore */ }
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
-      await sendLightCommand('lightOn', emptyPosition);
+      // 关键: BLE 写不进去 = 下位机无响应 = 该位置不可存
+      // 这种情况: 显示文字提示 (Toast), 不弹"确认入库"弹窗
+      const lightResult = await sendLightCommand('lightOn', emptyPosition);
+      if (!lightResult || lightResult.success === false) {
+        showToast(`位置 ${emptyPosition} 不可存, 请更换`);
+        resumeScanning();
+        return;
+      }
       currentLitPosition.current = emptyPosition;
 
-      // 立即显示弹窗，使用二维码中的数据
+      // 灯亮 → 弹"确认入库"弹窗
       setCurrentDeviceInfo({ name: deviceName || supplierId, supplierId });
       setCurrentEmptyPosition(emptyPosition);
       setDeviceSnapshot({ ...newDevice });
@@ -763,23 +779,36 @@ const ScanScreen = ({ navigation, route }) => {
   /**
    * 从位置选择器选择位置后，仅更新位置变量，回到确认弹窗
    * 不会直接上架，需要用户在确认弹窗点击确认才会上架
+   *
+   * 流程:
+   *   1. 发 lightOn 试亮新位置
+   *   2. 试亮成功 → 回到"确认入库"弹窗
+   *   3. 试亮失败 → 显示 Toast "该位置不可存, 请更换", 留在位置选择器
    */
   const handleSelectPosition = async (position) => {
     try {
-      // 只更新暂存器件的位置变量，不保存到数据库
+      // 熄灭之前的灯光
+      if (currentLitPosition.current !== null) {
+        try {
+          await sendLightCommand('lightOff', currentLitPosition.current);
+        } catch (e) { /* ignore */ }
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      // 试亮新位置
+      const lightResult = await sendLightCommand('lightOn', position);
+      if (!lightResult || lightResult.success === false) {
+        // 下位机无响应: 不弹"确认入库", 留 Toast 文字提示
+        showToast(`位置 ${position} 不可存, 请更换`);
+        return;  // 不关闭位置选择器, 让用户继续选
+      }
+      currentLitPosition.current = position;
+
+      // 更新暂存器件的位置变量
       if (pendingDeviceRef.current) {
         pendingDeviceRef.current.location = String(position);
       }
 
-      // 熄灭之前的灯光，点亮新选择的位灯
-      if (currentLitPosition.current !== null) {
-        await sendLightCommand('lightOff', currentLitPosition.current);
-        await new Promise(resolve => setTimeout(resolve, 300));
-      }
-      await sendLightCommand('lightOn', position);
-      currentLitPosition.current = position;
-
-      // 回到确认弹窗，显示新选择的位置
+      // 灯亮 → 回到"确认入库"弹窗
       setCurrentEmptyPosition(position);
       setShowPositionPicker(false);
       setShowConfirmModal(true);
@@ -1091,9 +1120,9 @@ const ScanScreen = ({ navigation, route }) => {
                 {deviceSnapshot.name || deviceSnapshot.supplierId}
               </Text>
             )}
-            {/* 位置网格：8排，每排可展开/折叠 */}
+            {/* 位置网格：10 排，每排可展开/折叠 */}
             <ScrollView style={styles.positionGrid}>
-              {Array.from({ length: 8 }, (_, bankIndex) => (
+              {Array.from({ length: 10 }, (_, bankIndex) => (
                 <View key={bankIndex}>
                   {/* 排标题（点击展开/折叠） */}
                   <TouchableOpacity

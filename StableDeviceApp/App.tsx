@@ -25,6 +25,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import StorageService from './src/services/StorageService';
 import ShelfService from './src/services/ShelfService';
+import { runMigrationIfNeeded } from './src/services/migration';
 import { logError } from './src/utils/ErrorHandler';
 import * as pendingBomImport from './src/utils/pendingBomImport';
 import { setPendingAutoConnect } from './src/utils/pendingAutoConnect';
@@ -166,6 +167,8 @@ export default function App() {
   const [pendingBomName, setPendingBomName] = useState<string>('');
   // BOM 导入进行中状态
   const [isBomImporting, setIsBomImporting] = useState(false);
+  // 1.6.5 流式导入进度 (大文件不弹 OOM, 但要给用户进度反馈)
+  const [importProgress, setImportProgress] = useState<{phase: string; deviceCount: number; read: number; total: number; message?: string} | null>(null);
 
   /**
    * 处理从外部应用接收到的 URL（冷启动或热启动）
@@ -216,6 +219,23 @@ export default function App() {
     return () => {
       subscription.remove();
     };
+  }, []);
+
+  // ============ 1.6.5: 启动时异步迁移老 AsyncStorage 数据到 SQLite ============
+  // 关键: 必须在用户做任何导入/导出/添加器件之前跑完
+  //       但不能阻塞 UI (迁移可能耗时几百毫秒到几秒, 取决于老数据量)
+  //       失败不阻塞 App 启动, 老数据保留, 下次启动再试
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await runMigrationIfNeeded();
+        if (result && !result.skipped) {
+          console.log('[App] 数据迁移完成:', result);
+        }
+      } catch (err) {
+        console.warn('[App] 数据迁移失败 (不阻塞, 老数据仍可用):', err);
+      }
+    })();
   }, []);
 
   // ============ 启动时一次性请求所有危险权限 ============
@@ -349,32 +369,52 @@ export default function App() {
   const handleConfirmImport = async () => {
     if (!pendingImportUri) return;
     setIsImporting(true);
+    setImportProgress({ phase: 'open', deviceCount: 0, read: 0, total: 0, message: '打开文件...' });
     try {
       // 【关键】读文件前先灭灯 + 清 BOM — 用户在弹窗点"导入"时, 当前库存的
       // BOM 状态必然会被废弃, 这一步在物理层先清掉, 避免"弹窗已确认但灯还亮着"
       try { await ShelfService.clearBomAndLights(); } catch (e) { /* ignore */ }
 
-      const fileContent = await readImportFile(pendingImportUri);
-      const backupData = JSON.parse(fileContent);
-      const result = await StorageService.importShelfFromFile(pendingImportName, backupData);
+      // 1.6.5: 直接把 URI 喂给流式导入, 不再 readAsStringAsync + JSON.parse (大文件会 OOM)
+      // streamImportShelfFromFile 内部: fetch + arrayBuffer + 64KB 分块喂 StreamParser
+      const result = await StorageService.streamImportShelfFromFile(
+        pendingImportUri,
+        pendingImportName,
+        {
+          onProgress: (p: any) => {
+            setImportProgress({
+              phase: p.phase || 'reading',
+              deviceCount: p.deviceCount || 0,
+              read: p.read || 0,
+              total: p.total || 0,
+              message: p.message,
+            });
+          },
+        }
+      );
 
       // 关键: 把"目标库存"绑定的蓝牙标记为待自动连
       // DeviceListScreen 获得焦点时会消费这个标记, 后台静默连, 不弹切库提示
-      if (result.bluetoothMac) {
-        setPendingAutoConnect(result.bluetoothMac, result.bluetoothName || '');
-        console.log('[App.handleConfirmImport] 标记待自动连:', result.bluetoothMac, result.bluetoothName);
+      const mac = result.sourceBluetoothMac || '';
+      const bname = result.sourceBluetoothName || '';
+      if (mac) {
+        setPendingAutoConnect(mac, bname);
+        console.log('[App.handleConfirmImport] 标记待自动连:', mac, bname);
       }
 
       // 关闭弹窗并清理状态
-      const importedName = pendingImportName;
       setPendingImportUri(null);
       setPendingImportName('');
       setIsImporting(false);
+      setImportProgress(null);
 
       const actionLabel = result.action === 'add' ? '已新建' : '已覆盖';
+      const imageHint = result.restoredImageCount
+        ? `\n已恢复 ${result.restoredImageCount} 张图片`
+        : '';
       Alert.alert(
         '导入成功',
-        `${actionLabel}库存「${result.shelfName}」`,
+        `${actionLabel}库存「${result.shelfName}」\n共 ${result.deviceCount} 个器件${imageHint}`,
         [
           {
             text: '确定',
@@ -397,6 +437,7 @@ export default function App() {
     } catch (error) {
       logError('从外部应用导入数据失败', error as Error, 'App.handleConfirmImport');
       setIsImporting(false);
+      setImportProgress(null);
       Alert.alert(
         '导入失败',
         (error as Error).message || '文件格式不正确',
@@ -559,6 +600,56 @@ export default function App() {
 
               <Text style={styles.modalTip}>是否导入？</Text>
 
+              {/* 导入进行中时显示进度条 (基于 importProgress state 实时刷新) */}
+              {isImporting && importProgress ? (
+                <View style={styles.importProgressWrap}>
+                  <View style={styles.importProgressHeaderRow}>
+                    <Text style={styles.importProgressStatusText} numberOfLines={1}>
+                      {importProgress.message || '正在处理...'}
+                    </Text>
+                    <Text style={styles.importProgressPercentText}>
+                      {(() => {
+                        const phase = importProgress.phase;
+                        if (phase === 'done') return '100%';
+                        if (phase === 'devices-done') return '98%';
+                        if (phase === 'parsing') {
+                          const dc = importProgress.deviceCount || 0;
+                          return `${Math.min(95, 60 + Math.round(dc * 0.4))}%`;
+                        }
+                        if (phase === 'reading' && importProgress.total > 0) {
+                          return `${Math.round((importProgress.read / importProgress.total) * 60)}%`;
+                        }
+                        if (phase === 'open') return '5%';
+                        return '0%';
+                      })()}
+                    </Text>
+                  </View>
+                  {(() => {
+                    const phase = importProgress.phase;
+                    let pct = 0;
+                    if (phase === 'done') pct = 100;
+                    else if (phase === 'devices-done') pct = 98;
+                    else if (phase === 'parsing') pct = Math.min(95, 60 + (importProgress.deviceCount || 0) * 0.4);
+                    else if (phase === 'reading' && importProgress.total > 0) pct = (importProgress.read / importProgress.total) * 60;
+                    else if (phase === 'open') pct = 5;
+                    const clamped = Math.max(0, Math.min(100, pct));
+                    return (
+                      <View style={styles.importProgressBarTrack}>
+                        <View
+                          style={[
+                            styles.importProgressBarFill,
+                            { width: `${clamped}%` },
+                          ]}
+                        />
+                      </View>
+                    );
+                  })()}
+                  <Text style={styles.importProgressDeviceCount}>
+                    已解析 {importProgress.deviceCount || 0} 个器件
+                  </Text>
+                </View>
+              ) : null}
+
               <View style={styles.modalButtons}>
                 <TouchableOpacity
                   style={[styles.modalButton, styles.cancelButton]}
@@ -711,6 +802,68 @@ const styles = StyleSheet.create({
     color: '#666',
     lineHeight: 20,
     marginBottom: 20,
+  },
+  // 1.6.5: 流式导入进度框
+  importProgressBox: {
+    backgroundColor: '#e3f2fd',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+    borderLeftWidth: 3,
+    borderLeftColor: '#1976d2',
+  },
+  importProgressText: {
+    fontSize: 13,
+    color: '#1976d2',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  importProgressSub: {
+    fontSize: 12,
+    color: '#666',
+  },
+  // 导入进度条可视化 (View 实现, 不复用上面 importProgressBox 旧版)
+  importProgressWrap: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  importProgressHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  importProgressStatusText: {
+    fontSize: 14,
+    color: '#495057',
+    fontWeight: '500',
+    flexShrink: 1,
+  },
+  importProgressPercentText: {
+    fontSize: 18,
+    color: '#007AFF',
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    marginLeft: 8,
+  },
+  importProgressBarTrack: {
+    height: 8,
+    backgroundColor: '#e9ecef',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  importProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#007AFF',
+    borderRadius: 4,
+  },
+  importProgressDeviceCount: {
+    fontSize: 13,
+    color: '#6c757d',
+    marginTop: 6,
   },
   modalButtons: {
     flexDirection: 'row',

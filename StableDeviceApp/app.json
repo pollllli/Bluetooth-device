@@ -2,7 +2,7 @@
   "expo": {
     "name": "StableDeviceApp",
     "slug": "StableDeviceApp",
-    "version": "1.6.5",
+    "version": "1.6.8",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",

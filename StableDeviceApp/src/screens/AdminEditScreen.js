@@ -19,6 +19,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Modal,
+  ToastAndroid,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import StorageService from '../services/StorageService';
@@ -98,11 +99,29 @@ const AdminEditScreen = ({ navigation, route }) => {
   const previewTimeout = useRef(null);
 
   const sendLightCommand = async (type, position) => {
-    if (!global.deviceConnection || !global.deviceConnection.handler) return;
+    if (!global.deviceConnection || !global.deviceConnection.handler) {
+      return { success: false, message: '未连接蓝牙' };
+    }
     try {
-      await global.deviceConnection.handler.sendCommand({ type, lightId: position });
+      // sendCommand 返回 { success, message }, true=下位机接受命令, false=BLE 失败
+      const result = await global.deviceConnection.handler.sendCommand({ type, lightId: position });
+      return result || { success: true };  // 没返回值视为成功
     } catch (error) {
       console.log('灯光指令发送失败:', error);
+      return { success: false, message: error?.message || '发送失败' };
+    }
+  };
+
+  /**
+   * 显示一行文字提示 (无弹窗, 用 Toast / 内嵌条, 1.5s 后自动消失)
+   * 给"下位机无响应"场景用, 区别于"请用户做选择"的 Alert.alert
+   */
+  const showHint = (message) => {
+    if (Platform.OS === 'android') {
+      ToastAndroid.show(message, ToastAndroid.SHORT);
+    } else {
+      // iOS / 其他: 兜底用 Alert, 但 iOS 实际不会触发此分支 (主要平台是 Android)
+      Alert.alert('提示', message);
     }
   };
 
@@ -197,7 +216,8 @@ const AdminEditScreen = ({ navigation, route }) => {
   const getAllPositions = () => {
     const occupied = getOccupiedPositions();
     const positions = [];
-    for (let i = 0; i < 240; i++) {
+    // 300 位置 (10 排 × 30) = 单库存容量上限, 跟 utils/positionUtils.DEFAULT_MAX 同步
+    for (let i = 0; i < 300; i++) {
       positions.push({
         position: i,
         isOccupied: occupied.has(i),
@@ -469,7 +489,7 @@ const AdminEditScreen = ({ navigation, route }) => {
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>选择物理位置</Text>
             <ScrollView style={styles.positionGrid}>
-              {Array.from({ length: 8 }, (_, bankIndex) => (
+              {Array.from({ length: 10 }, (_, bankIndex) => (
                 <View key={bankIndex}>
                   <TouchableOpacity
                     style={styles.positionBankHeader}
@@ -498,14 +518,43 @@ const AdminEditScreen = ({ navigation, route }) => {
                               ]}
                               onPress={async () => {
                                 if (posInfo.isOccupied && !isCurrentPosition) return;
-                                if (global.deviceConnection && global.deviceConnection.handler) {
-                                  if (currentLitPosition.current !== null) {
-                                    await sendLightCommand('lightOff', currentLitPosition.current);
-                                    await new Promise(resolve => setTimeout(resolve, 300));
-                                  }
-                                  await sendLightCommand('lightOn', posInfo.position);
-                                  currentLitPosition.current = posInfo.position;
+                                // 选位置流程 (无弹窗版):
+                                //   1. 没连蓝牙 → 直接保存 (用户可能没连下位机也想存位置)
+                                //   2. 连了蓝牙 → 发"亮灯"命令试亮
+                                //      · 试亮成功 → 直接保存, 啥都不弹 (用户能直接看到灯亮)
+                                //      · 试亮失败 (BLE 写失败 / 下位机不响应) → 弹"该位置不可存, 请更换"
+                                // 这样:
+                                //   · 下位机有灯, 灯亮 → 一键入库, 不打扰
+                                //   · 下位机无对应灯, BLE 写不进去 → 友好提示
+                                //   · 不在代码里硬编码硬件上限, 任何下位机都不用改代码
+                                if (!global.deviceConnection || !global.deviceConnection.handler) {
+                                  // 没连蓝牙: 直接保存, 不打扰用户
+                                  dispatch({
+                                    type: 'SET_FIELD',
+                                    payload: { field: 'location', value: String(posInfo.position) },
+                                  });
+                                  setShowPositionPicker(false);
+                                  return;
                                 }
+
+                                // 有蓝牙: 先试亮
+                                if (currentLitPosition.current !== null) {
+                                  try {
+                                    await sendLightCommand('lightOff', currentLitPosition.current);
+                                  } catch (e) { /* ignore */ }
+                                  await new Promise(resolve => setTimeout(resolve, 200));
+                                }
+                                const result = await sendLightCommand('lightOn', posInfo.position);
+
+                                if (!result || result.success === false) {
+                                  // 下位机无响应 → Toast 文字提示 (无弹窗, 1.5s 自动消失)
+                                  // 用户继续在位置选择器里操作
+                                  showHint(`位置 ${posInfo.position} 不可存, 请更换`);
+                                  return;
+                                }
+
+                                // 试亮成功 → 直接入库, 不弹任何提示
+                                currentLitPosition.current = posInfo.position;
                                 dispatch({
                                   type: 'SET_FIELD',
                                   payload: { field: 'location', value: String(posInfo.position) },
@@ -514,6 +563,9 @@ const AdminEditScreen = ({ navigation, route }) => {
                               }}
                               onLongPress={async () => {
                                 if (posInfo.isOccupied && !isCurrentPosition) return;
+                                // 长按只是预览, 不弹确认 (避免长按也弹窗干扰用户)
+                                // 用户最终点 onPress 才会存, 那时再弹确认
+                                if (!global.deviceConnection || !global.deviceConnection.handler) return;
                                 if (global.deviceConnection && global.deviceConnection.handler) {
                                   // 清除之前的自动熄灭定时器
                                   if (previewTimeout.current) {
