@@ -892,17 +892,31 @@ const ScanScreen = ({ navigation, route }) => {
   };
 
   /**
-   * 关闭位置选择器，回到确认弹窗（立即熄灭预览灯）
+   * 关闭位置选择器，回到确认弹窗
+   * 修复：用户没有改位置直接点取消时，重新点亮之前的位置灯（第一个空位置）
+   * 避免出现"刚刚检测到的第一个空位置灯不亮了"的问题
    */
-  const handleCancelPositionPicker = () => {
-    // 清除预览定时器并熄灭灯光
+  const handleCancelPositionPicker = async () => {
+    // 清除预览定时器
     if (previewTimeout.current) {
       clearTimeout(previewTimeout.current);
       previewTimeout.current = null;
     }
+    // 熄灭当前可能亮的灯（可能是预览时亮的灯）
     if (currentLitPosition.current !== null) {
-      sendLightCommand('lightOff', currentLitPosition.current);
-      currentLitPosition.current = null;
+      try {
+        await sendLightCommand('lightOff', currentLitPosition.current);
+      } catch (e) { /* ignore */ }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    // 重新点亮之前选中的位置（用户没有改位置，恢复到第一个空位置的灯）
+    if (currentEmptyPosition !== null) {
+      const lightResult = await sendLightCommand('lightOn', currentEmptyPosition);
+      if (lightResult && lightResult.success === false) {
+        showToast(`位置 ${currentEmptyPosition} 不可存, 请更换`);
+      } else {
+        currentLitPosition.current = currentEmptyPosition;
+      }
     }
     setShowPositionPicker(false);
     setShowConfirmModal(true);
