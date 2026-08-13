@@ -452,11 +452,10 @@ const ConnectionScreen = ({ navigation, route }) => {
       const sorted = sortDevicesByRssi(devices);
       setAvailableDevices(sorted);
       if (sorted.length === 0) {
-        // 2 秒未扫到任何信号强度 ≥ -80dBm 的设备，提供重扫选项
-        // (-80dBm = 强信号, 加快扫描速度, 过滤掉远距离/穿墙的弱信号设备)
+        // 2 秒内未扫到任何 W02_ 设备
         Alert.alert(
           '未发现蓝牙设备',
-          '2 秒内未扫描到信号强度足够的设备（RSSI ≥ -80dBm）。\n请确保设备已开启且距离较近。',
+          '2 秒内未扫描到名称以 "W02_" 开头的蓝牙设备。\n请确保设备已开启、在范围内，且名称以 W02_ 开头。',
           [
             { text: '取消', style: 'cancel' },
             {

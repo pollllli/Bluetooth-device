@@ -63,10 +63,15 @@ temp/
 /.git-rewrite/
 /export.txt
 
+# 备份目录
+StableDeviceApp_backup_v*/
+StableDeviceApp/backup_before_*/
+
 # 测试文件
 test_response.html
 detail_page.html
 test_*.py.bak
+test-500-devices.json
 
 # Misc
 flutter.zip

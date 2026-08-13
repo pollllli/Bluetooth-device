@@ -69,11 +69,83 @@ describe('StorageService', () => {
     test('应该能够过滤器件', async () => {
       await StorageService.addDevice({ name: '器件A', shelfId: '1' });
       await StorageService.addDevice({ name: '器件B', shelfId: '2' });
-      
+
       const results = await StorageService.filterDevices({ shelfId: '1' });
-      
+
       expect(results.length).toBe(1);
       expect(results[0].name).toBe('器件A');
+    });
+  });
+
+  describe('按数量存取 (adjustStock)', () => {
+    test('存入应该增加数量', async () => {
+      const device = await StorageService.addDevice({ name: '电阻', quantity: 5 });
+
+      const updated = await StorageService.adjustStock(device.id, 3);
+
+      expect(updated.quantity).toBe(8);
+      // 持久化生效
+      const reloaded = await StorageService.getDeviceById(device.id);
+      expect(reloaded.quantity).toBe(8);
+    });
+
+    test('取用应该减少数量', async () => {
+      const device = await StorageService.addDevice({ name: '电阻', quantity: 10 });
+
+      const updated = await StorageService.adjustStock(device.id, -4);
+
+      expect(updated.quantity).toBe(6);
+      const reloaded = await StorageService.getDeviceById(device.id);
+      expect(reloaded.quantity).toBe(6);
+    });
+
+    test('取用到 0 应该成功', async () => {
+      const device = await StorageService.addDevice({ name: '电阻', quantity: 3 });
+
+      const updated = await StorageService.adjustStock(device.id, -3);
+
+      expect(updated.quantity).toBe(0);
+    });
+
+    test('取用超过库存应该抛出"库存不足"', async () => {
+      const device = await StorageService.addDevice({ name: '电阻', quantity: 2 });
+
+      await expect(StorageService.adjustStock(device.id, -5)).rejects.toThrow(
+        /库存不足/
+      );
+      // 数量不应改变
+      const reloaded = await StorageService.getDeviceById(device.id);
+      expect(reloaded.quantity).toBe(2);
+    });
+
+    test('delta 为 0 应该抛出错误', async () => {
+      const device = await StorageService.addDevice({ name: '电阻', quantity: 5 });
+
+      await expect(StorageService.adjustStock(device.id, 0)).rejects.toThrow(
+        /非零/
+      );
+    });
+
+    test('缺少 deviceId 应该抛出错误', async () => {
+      await expect(StorageService.adjustStock(null, 1)).rejects.toThrow(
+        /缺少器件ID/
+      );
+    });
+
+    test('器件不存在应该抛出错误', async () => {
+      await expect(StorageService.adjustStock(99999, 1)).rejects.toThrow(
+        /器件不存在/
+      );
+    });
+
+    test('连续存取应该正确累计', async () => {
+      const device = await StorageService.addDevice({ name: '电阻', quantity: 5 });
+
+      await StorageService.adjustStock(device.id, 3);   // 8
+      await StorageService.adjustStock(device.id, -2);  // 6
+      const final = await StorageService.adjustStock(device.id, 4); // 10
+
+      expect(final.quantity).toBe(10);
     });
   });
 

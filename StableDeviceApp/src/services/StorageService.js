@@ -423,6 +423,97 @@ class StorageService {
   }
 
   /**
+   * 按数量存取器件 (事务化增减 quantity + 写流水)
+   * - delta > 0: 存入; delta < 0: 取用
+   * - 校验 取用后数量 >= 0, 否则抛 "库存不足"
+   * - 优先走 SQLite 单行更新 (高效, 不全量重写), 失败降级 updateDevice
+   * - 写一条 stock_transactions 流水记录, 便于追溯
+   * @param {number} deviceId - 器件ID
+   * @param {number} delta - 增减量 (正=存入, 负=取用)
+   * @returns {Promise<Object>} 更新后的器件对象
+   * @throws {Error} 器件不存在 / 库存不足
+   */
+  static async adjustStock(deviceId, delta) {
+    try {
+      if (deviceId == null) throw new Error('缺少器件ID');
+      const numDelta = Number(delta);
+      if (!Number.isFinite(numDelta) || numDelta === 0) {
+        throw new Error('数量增减必须为非零数字');
+      }
+
+      const device = await this.getDeviceById(deviceId);
+      if (!device) throw new Error('器件不存在');
+
+      const currentQty = Number(device.quantity) || 0;
+      const newQty = currentQty + numDelta;
+      if (newQty < 0) {
+        throw new Error(
+          `库存不足 (当前 ${currentQty}, 无法取用 ${Math.abs(numDelta)})`
+        );
+      }
+
+      const updated = {
+        ...device,
+        quantity: newQty,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const db = getDB();
+      if (db && typeof db.upsertDevice === 'function') {
+        // 优先: SQLite 单行更新 (不全量重写, 高效)
+        try {
+          await db.upsertDevice(updated);
+          // 写流水 (失败不阻塞主流程, 仅告警)
+          if (typeof db.insertStockTransaction === 'function') {
+            try {
+              await db.insertStockTransaction({
+                deviceId: device.id,
+                shelfId: device.shelfId,
+                type: numDelta > 0 ? 'in' : 'out',
+                quantity: Math.abs(numDelta),
+                balance: newQty,
+              });
+            } catch (txnErr) {
+              console.warn('[adjustStock] 写流水失败 (数量已更新):', txnErr?.message);
+            }
+          }
+          // 失效缓存, 下次 getDevices 从 SQLite 读最新值
+          this.#clearCache('devices');
+          return updated;
+        } catch (sqlErr) {
+          console.warn('[adjustStock] SQLite 单行更新失败, 降级 updateDevice:', sqlErr?.message);
+        }
+      }
+
+      // 降级: 走 updateDevice (全量读写, 保证一致性)
+      await this.updateDevice(updated);
+      return updated;
+    } catch (error) {
+      logError('存取器件失败', error, 'StorageService.adjustStock');
+      throw error;
+    }
+  }
+
+  /**
+   * 查询指定器件的存取流水
+   * @param {number} deviceId - 器件ID
+   * @param {number} [limit=50] - 返回条数
+   * @returns {Promise<Array>} 流水记录数组 (按时间倒序)
+   */
+  static async getStockTransactions(deviceId, limit = 50) {
+    try {
+      const db = getDB();
+      if (db && typeof db.getStockTransactionsByDevice === 'function') {
+        return await db.getStockTransactionsByDevice(deviceId, limit);
+      }
+      return [];
+    } catch (error) {
+      logError('查询存取流水失败', error, 'StorageService.getStockTransactions');
+      return [];
+    }
+  }
+
+  /**
    * 保存上次连接的蓝牙设备信息
    * @param {Object} deviceInfo - 设备信息对象
    * @param {string} deviceInfo.deviceId - 设备ID

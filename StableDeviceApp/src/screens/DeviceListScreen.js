@@ -48,6 +48,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { getCategories, DEVICE_CATEGORIES } from '../services/DeviceCategoryService';
 import ShelfService from '../services/ShelfService';
 import SwipeableRow from '../components/SwipeableRow';
+import StockInOutSheet from '../components/StockInOutSheet';
 import { consumePendingAutoConnect } from '../utils/pendingAutoConnect';
 import { autoConnectBluetooth } from '../utils/autoConnectBluetooth';
 import { subscribe as subscribeLight, emitLightAllOff } from '../utils/lightEvents';
@@ -193,6 +194,15 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
   const successAnimation = useMemo(() => new Animated.Value(0), []);
   const lastConnectedStatus = useRef(false);
 
+  // ========== 存取弹窗 state ==========
+  // showStockSheet: 弹窗是否打开; stockDevice: 当前操作的器件; stockPosition: 对应硬件位置
+  const [showStockSheet, setShowStockSheet] = useState(false);
+  const [stockDevice, setStockDevice] = useState(null);
+  const [stockPosition, setStockPosition] = useState(null);
+  // 单例锁: 弹窗打开期间拒绝其他标签点击; 防抖: 250ms 内只认一次点击
+  const stockSheetOpenRef = useRef(false);
+  const lastTagClickRef = useRef(0);
+
   // 解构状态
   const {
     devices,
@@ -253,6 +263,17 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       // 不管什么 type, 全部以 store 为准, 重新同步本地 state
       const snap = getLitDeviceIdsSnapshot();
       dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: snap });
+      // 边界: 灯光被全局清空 (切库/失焦/BOM清空) 时, 若存取弹窗还开着, 强制关闭
+      // (避免弹窗引用的 device/灯位与当前库存不一致)
+      if (
+        (event.type === 'allOff' || event.type === 'replace') &&
+        stockSheetOpenRef.current
+      ) {
+        setShowStockSheet(false);
+        stockSheetOpenRef.current = false;
+        setStockDevice(null);
+        setStockPosition(null);
+      }
     });
     return unsubscribe;
   }, []);
@@ -590,9 +611,23 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
     }
   }, [dispatch, currentShelfId]);
 
+  /**
+   * 点击器件标签 → 打开存取弹窗 + 亮灯引导
+   * (原"亮/灭灯切换"升级为"弹窗存取", 灯只负责引导定位)
+   * - 单例锁: 弹窗打开期间拒绝其他标签点击 (防多点并发)
+   * - 防抖: 250ms 内只认一次点击 (防误触连点)
+   */
   const handleDeviceTagPress = useCallback(
     async (device, hardwarePosition) => {
       try {
+        // 防抖: 250ms 内只认一次
+        const now = Date.now();
+        if (now - lastTagClickRef.current < 250) return;
+        lastTagClickRef.current = now;
+
+        // 单例锁: 弹窗已打开时直接拒绝
+        if (stockSheetOpenRef.current) return;
+
         if (!isConnected || !global.deviceConnection) {
           Alert.alert('提示', '请先在连接页面连接蓝牙设备');
           dispatch({ type: 'SET_CONNECTED', payload: false });
@@ -600,46 +635,105 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         }
 
         const { handler } = global.deviceConnection;
-        const isLit = litDeviceIds.includes(device.id);
 
-        if (isLit) {
-          const response = await handler.sendCommand({
-            type: 'lightOff',
-            lightId: hardwarePosition,
-          });
-
-          if (response.success) {
-            // 通过 store 统一管理: 移除 + emit, 其他页面同步
-            removeLitDevice(device.id);
-            dispatch({
-              type: 'SET_LIT_DEVICE_IDS',
-              payload: getLitDeviceIdsSnapshot(),
-            });
-            showSuccessMessage(`已熄灯: ${device.name}`);
-          } else {
-            Alert.alert('错误', `熄灯失败: ${response.message}`);
-          }
-        } else {
+        // 亮灯引导 (失败仍允许打开弹窗记账, 仅提示)
+        try {
           const response = await handler.sendCommand({
             type: 'lightOn',
             lightId: hardwarePosition,
           });
-
-          if (response.success) {
-            // 通过 store 统一管理: 添加 + emit, 其他页面同步
+          if (response && response.success) {
             addLitDevice(device.id);
             dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: getLitDeviceIdsSnapshot() });
-            showSuccessMessage(`已亮灯: ${device.name} (位置: ${hardwarePosition})`);
           } else {
-            Alert.alert('错误', `亮灯失败: ${response.message}`);
+            console.log('[存取] 亮灯失败, 仍打开弹窗记账:', response?.message);
           }
+        } catch (lightErr) {
+          console.log('[存取] 亮灯异常, 仍打开弹窗记账:', lightErr?.message);
         }
+
+        // 打开存取弹窗 + 记录单例锁
+        stockSheetOpenRef.current = true;
+        setStockDevice(device);
+        setStockPosition(hardwarePosition);
+        setShowStockSheet(true);
       } catch (error) {
         logError('器件操作失败', error, 'DeviceListScreen.handleDeviceTagPress');
         Alert.alert('错误', `操作失败: ${formatErrorMessage(error)}`);
       }
     },
-    [isConnected, litDeviceIds, devices, showSuccessMessage]
+    [isConnected, showSuccessMessage]
+  );
+
+  /**
+   * 关闭存取弹窗的统一出口 (取消 / 遮罩 / 确认后都会走这里)
+   * - 必须灭灯 + 移除亮灯状态 (取消也要灭灯, 避免灯常亮)
+   */
+  const handleStockClose = useCallback(async () => {
+    // 先关 UI, 避免用户连点
+    setShowStockSheet(false);
+    stockSheetOpenRef.current = false;
+
+    const device = stockDevice;
+    const hardwarePosition = stockPosition;
+    setStockDevice(null);
+    setStockPosition(null);
+
+    // 灭灯 (失败静默, 不阻塞关闭)
+    if (device && hardwarePosition != null) {
+      if (global.deviceConnection && global.deviceConnection.handler) {
+        try {
+          await global.deviceConnection.handler.sendCommand({
+            type: 'lightOff',
+            lightId: hardwarePosition,
+          });
+        } catch (e) {
+          console.log('[存取] 关闭灭灯失败:', e?.message);
+        }
+      }
+      removeLitDevice(device.id);
+      dispatch({ type: 'SET_LIT_DEVICE_IDS', payload: getLitDeviceIdsSnapshot() });
+    }
+  }, [stockDevice, stockPosition]);
+
+  /**
+   * 存取弹窗确认回调 → 事务化增减 quantity → 灭灯
+   * @param {string} mode - 'in'(存入) / 'out'(取用)
+   * @param {number} qty - 数量
+   */
+  const handleStockConfirm = useCallback(
+    async (mode, qty) => {
+      const device = stockDevice;
+      const hardwarePosition = stockPosition;
+      if (!device) return;
+
+      const delta = mode === 'in' ? Math.abs(qty) : -Math.abs(qty);
+
+      try {
+        const updated = await StorageService.adjustStock(device.id, delta);
+
+        // 局部更新 devices state (免全量 reload)
+        dispatch({
+          type: 'SET_DEVICES',
+          payload: devices.map((d) =>
+            d.id === device.id
+              ? { ...d, quantity: updated.quantity, updatedAt: updated.updatedAt }
+              : d
+          ),
+        });
+
+        showSuccessMessage(
+          `${mode === 'in' ? '已存入' : '已取用'} ${Math.abs(qty)} · 结存 ${updated.quantity}`
+        );
+      } catch (error) {
+        logError('存取器件失败', error, 'DeviceListScreen.handleStockConfirm');
+        Alert.alert('错误', formatErrorMessage(error));
+      } finally {
+        // 无论成功失败都关弹窗 + 灭灯
+        await handleStockClose();
+      }
+    },
+    [stockDevice, stockPosition, devices, showSuccessMessage, handleStockClose]
   );
 
   // 使用 useMemo 缓存过滤后的设备列表
@@ -1186,11 +1280,12 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
                       marginLeft: 24,
                       textAlign: 'right',
                     },
+                    Number(item.quantity) === 0 && styles.deviceTagQtyZero,
                   ]}
                   numberOfLines={1}
                   ellipsizeMode="tail"
                 >
-                  ×{item.quantity || 1}
+                  {Number(item.quantity) === 0 ? '缺货' : `×${item.quantity || 1}`}
                 </Text>
               </View>
             </View>
@@ -1710,6 +1805,16 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           <Text style={styles.imageZoomHint}>点击任意位置返回</Text>
         </Pressable>
       </Modal>
+
+      {/* ========== 存取弹窗 ==========
+          点击器件标签弹出, 选存入/取用 + 数量, 确认后事务化增减 quantity
+          弹窗打开期间该位置灯亮起引导, 关闭/确认后灭灯 */}
+      <StockInOutSheet
+        visible={showStockSheet}
+        device={stockDevice}
+        onClose={handleStockClose}
+        onConfirm={handleStockConfirm}
+      />
     </SafeAreaView>
   );
 };
@@ -2305,6 +2410,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#666',
     lineHeight: 16,
+  },
+  // 数量为 0 时显示"缺货"灰态
+  deviceTagQtyZero: {
+    color: '#ef4444',
+    fontWeight: '600',
   },
   // 第一行: 编号 + 类目(flex 同行, 编号不被挤, 类目允许被压, y 中心对齐)
   deviceTagRowTop: {

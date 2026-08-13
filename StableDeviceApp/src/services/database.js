@@ -142,6 +142,20 @@ const SCHEMA_STATEMENTS = [
     key TEXT PRIMARY KEY,
     value TEXT
   );`,
+
+  // ---- 存取流水表 (器件按数量存取记录, 便于追溯/撤销) ----
+  // 每次存入/取用一条记录, balance 为操作后结存
+  `CREATE TABLE IF NOT EXISTS stock_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id INTEGER NOT NULL,
+    shelf_id TEXT,
+    type TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    balance INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_txn_device ON stock_transactions(device_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_txn_shelf ON stock_transactions(shelf_id);`,
 ];
 
 async function createSchema(db) {
@@ -748,6 +762,51 @@ export async function deleteState(key) {
   await db.runAsync('DELETE FROM app_state WHERE key = ?;', [key]);
 }
 
+// ========== 公开 API: 存取流水 (stock_transactions) ==========
+
+/**
+ * 插入一条存取流水
+ * @param {Object} t - { deviceId, shelfId, type('in'/'out'), quantity, balance }
+ * @returns {Promise<number>} 新插入的流水 id
+ */
+export async function insertStockTransaction(t) {
+  const db = await getDB();
+  const now = new Date().toISOString();
+  const res = await db.runAsync(
+    `INSERT INTO stock_transactions (device_id, shelf_id, type, quantity, balance, created_at)
+     VALUES (?, ?, ?, ?, ?, ?);`,
+    [
+      t.deviceId,
+      t.shelfId ?? null,
+      t.type === 'in' ? 'in' : 'out',
+      Math.abs(Number(t.quantity)) || 0,
+      Number(t.balance) || 0,
+      now,
+    ]
+  );
+  return res?.lastInsertRowId ?? null;
+}
+
+/**
+ * 查询指定器件的存取流水 (最近 limit 条, 默认 50)
+ */
+export async function getStockTransactionsByDevice(deviceId, limit = 50) {
+  const db = await getDB();
+  const rows = await db.getAllAsync(
+    `SELECT * FROM stock_transactions WHERE device_id = ? ORDER BY id DESC LIMIT ?;`,
+    [deviceId, limit]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    deviceId: r.device_id,
+    shelfId: r.shelf_id,
+    type: r.type,
+    quantity: r.quantity,
+    balance: r.balance,
+    createdAt: r.created_at,
+  }));
+}
+
 // ========== 统计 ==========
 
 /**
@@ -756,7 +815,7 @@ export async function deleteState(key) {
 export async function getStats() {
   const db = await getDB();
   const stats = {};
-  for (const table of ['devices', 'shelves', 'boms', 'categories', 'app_state']) {
+  for (const table of ['devices', 'shelves', 'boms', 'categories', 'app_state', 'stock_transactions']) {
     const row = await db.getFirstAsync(`SELECT COUNT(*) AS n FROM ${table};`);
     stats[table] = row?.n ?? 0;
   }
@@ -801,4 +860,7 @@ export default {
   getState,
   setState,
   deleteState,
+  // stock_transactions
+  insertStockTransaction,
+  getStockTransactionsByDevice,
 };

@@ -214,28 +214,28 @@ class BluetoothHandler {
             // 过滤条件（用户需求）：
             //   1) 必须有名称
             //   2) 名称必须以 "W02_" 开头（只显示本 app 专用的蓝牙模块, 过滤其他蓝牙设备）
-            //   3) RSSI 必须 > -80dBm（只保留信号较强的设备，过滤掉弱信号设备）
-            //   4) 未重复的设备
+            //   3) 未重复的设备
+            // 注：已注释掉 RSSI 强度限制 — 只要是 W02_ 开头的设备全部显示（后续仍按信号强度排序展示）
+            //   (原条件) typeof device.rssi === 'number' && device.rssi > -80
             if (
               device.name &&
               device.name.startsWith('W02_') &&
-              typeof device.rssi === 'number' &&
-              device.rssi > -80 &&
               !devices.some((d) => d.id === device.id)
             ) {
               devices.push({
                 id: device.id,
                 name: device.name,
-                rssi: device.rssi,
+                rssi: typeof device.rssi === 'number' ? device.rssi : null,
               });
               console.log('发现设备:', device.name, device.id, device.rssi, 'dBm');
             } else if (device.name && !device.name.startsWith('W02_')) {
               // 调试日志：记录被过滤的非 W02_ 设备
               console.log('过滤非 W02_ 设备:', device.name, device.id);
-            } else if (device.name && typeof device.rssi === 'number' && device.rssi <= -80) {
-              // 调试日志：记录被过滤的弱信号设备
-              console.log('过滤弱信号设备:', device.name, device.id, device.rssi, 'dBm（<= -80）');
             }
+            // 注：已注释掉弱信号过滤日志
+            // else if (device.name && typeof device.rssi === 'number' && device.rssi <= -80) {
+            //   console.log('过滤弱信号设备:', device.name, device.id, device.rssi, 'dBm（<= -80）');
+            // }
           }
         );
       });
