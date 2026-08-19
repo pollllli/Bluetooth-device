@@ -1,4 +1,4 @@
-/**
+﻿﻿﻿﻿﻿﻿/**
  * 器件列表页面组件
  *
  * 功能说明：
@@ -44,14 +44,18 @@ import StorageService from '../services/StorageService';
 import BluetoothHandler from '../services/BluetoothHandler';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { generateSearchSuggestions, filterDevices } from '../utils/SearchUtils';
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 import { getCategories, DEVICE_CATEGORIES } from '../services/DeviceCategoryService';
 import ShelfService from '../services/ShelfService';
 import SwipeableRow from '../components/SwipeableRow';
 import StockInOutSheet from '../components/StockInOutSheet';
+import IconBadge from '../components/IconBadge';
+import InsetShadow from '../components/InsetShadow';
+import NeuSearchShadow from '../components/NeuSearchShadow';
 import { consumePendingAutoConnect } from '../utils/pendingAutoConnect';
 import { autoConnectBluetooth } from '../utils/autoConnectBluetooth';
 import { subscribe as subscribeLight, emitLightAllOff } from '../utils/lightEvents';
+import colors from '../theme/colors';
 import {
   subscribeLightStatus,
   getLitDeviceIdsSnapshot,
@@ -1341,7 +1345,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         <View style={styles.connectionStatusContainer}>
           {isConnected ? (
             <View style={[styles.statusIndicator, styles.connectedIndicator]}>
-              <Text style={styles.statusIcon}>🔵</Text>
+              <View style={[styles.statusCircle, styles.statusCircleConnected]} />
               <Text style={styles.statusText}>已连接</Text>
             </View>
           ) : (
@@ -1350,7 +1354,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
               onPress={handleReconnect}
               activeOpacity={0.7}
             >
-              <Text style={styles.statusIcon}>⚪</Text>
+              <View style={[styles.statusCircle, styles.statusCircleDisconnected]} />
               <Text style={styles.statusText}>未连接</Text>
             </TouchableOpacity>
           )}
@@ -1360,17 +1364,23 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
       {/* 搜索容器 */}
       <View style={styles.searchContainer}>
         <View style={styles.searchInputWrapper}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="搜索名称、编号、封装、分类..."
-            value={searchQuery}
-            onChangeText={(text) =>
-              dispatch({ type: 'SET_SEARCH_QUERY', payload: text })
-            }
-            onFocus={() =>
-              dispatch({ type: 'SET_SHOW_SEARCH_HISTORY', payload: true })
-            }
-          />
+          <NeuSearchShadow borderRadius={28} inset={3} backgroundColor={colors.bg} style={{ flex: 1, marginRight: 10 }}>
+            <View style={styles.searchInput}>
+              <Ionicons name="search-outline" size={20} color={colors.textMuted} style={{ marginRight: 8 }} />
+              <TextInput
+                style={styles.searchInputField}
+                placeholder="Search"
+                placeholderTextColor={colors.textMuted}
+                value={searchQuery}
+                onChangeText={(text) =>
+                  dispatch({ type: 'SET_SEARCH_QUERY', payload: text })
+                }
+                onFocus={() =>
+                  dispatch({ type: 'SET_SHOW_SEARCH_HISTORY', payload: true })
+                }
+              />
+            </View>
+          </NeuSearchShadow>
           {searchQuery && (
             <TouchableOpacity
               style={styles.clearSearchButton}
@@ -1476,20 +1486,13 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#1976d2" />
+              <ActivityIndicator size="large" color={colors.accent} />
               <Text style={styles.loadingText}>加载器件数据中...</Text>
             </View>
           ) : shelves.length === 0 ? (
             // ========== 关键: 新装用户零库存时的空状态 ==========
             // 引导用户从"设置 → 库存管理"创建第一个库存
             <View style={styles.emptyContainer}>
-              <View style={styles.emptyIconContainer}>
-                <Text style={styles.emptyIcon}>📦</Text>
-              </View>
-              <Text style={styles.emptyTitle}>还没有库存</Text>
-              <Text style={styles.emptySubtitle}>
-                请先创建一个库存, 再开始添加器件
-              </Text>
               <TouchableOpacity
                 style={styles.emptyPrimaryButton}
                 onPress={() => navigation.navigate('ShelfManager')}
@@ -1504,7 +1507,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
           ) : (
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconContainer}>
-                <Text style={styles.emptyIcon}>🔍</Text>
+                <IconBadge name="search-outline" size={36} />
               </View>
               <Text style={styles.emptyTitle}>
                 {searchQuery.trim() ? '未找到匹配的器件' : '暂无器件数据'}
@@ -1706,17 +1709,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         </View>
       </Modal>
 
-      {/* 库存切换 FAB: 左下角圆形 + 按钮 (绝对定位, 不影响列表滚动) */}
-      <TouchableOpacity
-        style={styles.shelfFab}
-        onPress={handleOpenShelfSheet}
-        activeOpacity={0.8}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-      >
-        <Text style={styles.shelfFabIcon}>⇄</Text>
-      </TouchableOpacity>
-
-      {/* 库存切换 BottomSheet: 从屏幕下方上滑弹出, 最大占屏幕一半高度 (仅切换) */}
+      {/* 库存切换 BottomSheet: 从底部导航栏顶部上移出现, 底边停在底栏顶部 (marginBottom: 80) */}
       {showShelfSheet && (
         <View style={styles.bottomSheetBackdrop}>
           <TouchableOpacity
@@ -1774,6 +1767,16 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
         </View>
       )}
 
+      {/* 库存切换 FAB: 必须在 bottom sheet 之后渲染 (z-order 上层), 弹窗打开时不被遮盖 */}
+      <TouchableOpacity
+        style={styles.shelfFab}
+        onPress={handleOpenShelfSheet}
+        activeOpacity={0.8}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Text style={styles.shelfFabIcon}>⇄</Text>
+      </TouchableOpacity>
+
       {/* ========== 器件图片全屏放大 Modal ==========
           与 ImageUploadField 同模式: 单击背景/图片/关闭按钮都能退出 */}
       <Modal
@@ -1822,7 +1825,7 @@ const DeviceListScreen = ({ navigation, route, isAdmin = false }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.bg,
   },
   // 器件架选择器样式
   shelfSelectorContainer: {
@@ -1838,20 +1841,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderRadius: 12,
+    borderRadius: 28,                    // 28 圆角 (与底栏/搜索框统一)
     borderWidth: 1,
-    borderColor: '#e0e0e0',
-    shadowColor: '#000',
+    borderColor: colors.border,
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
     },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOpacity: 0.12,                 // 与控制按钮上浮阴影统一
+    shadowRadius: 8,
+    elevation: 5,
     flex: 1,
     marginRight: 12,
   },
@@ -1867,15 +1870,27 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
+  statusCircle: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 6,
+  },
+  statusCircleConnected: {
+    backgroundColor: colors.teal,         // #59C2AF 已连接 (蓝绿/teal)
+  },
+  statusCircleDisconnected: {
+    backgroundColor: colors.textMuted,    // 灰色未连接
+  },
   connectedIndicator: {
-    backgroundColor: '#e8f5e8',
+    backgroundColor: colors.successBg,
     borderWidth: 1,
-    borderColor: '#c8e6c9',
+    borderColor: colors.successBg,
   },
   disconnectedIndicator: {
-    backgroundColor: '#ffebee',
+    backgroundColor: colors.dangerBg,
     borderWidth: 1,
-    borderColor: '#ffcdd2',
+    borderColor: colors.dangerBg,
   },
   statusText: {
     fontSize: 12,
@@ -1888,7 +1903,7 @@ const styles = StyleSheet.create({
   shelfSelectorText: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
+    color: colors.textPrimary,
   },
   // 左上角标题的可点击按钮
   shelfSelectorButton: {
@@ -1905,22 +1920,23 @@ const styles = StyleSheet.create({
   // ===== 库存切换 FAB + BottomSheet =====
   shelfFab: {
     position: 'absolute',
-    right: 20, // 平移到右下角 (用户反馈: 左下角会遮挡器件图片)
-    bottom: 18, // 紧贴底部 tab 栏上方 (避免误触, 视觉上与"库存"tab 对齐)
+    right: 20, // 右下角 (用户反馈: 左下角遮挡器件)
+    bottom: 80, // 底栏上方约 20-30px (原 18 被底栏完全遮住, 用户看不到)
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent, // 薄荷绿 (与底栏"库存"tab 选中色一致)
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#000',
+    // 浮雕上浮阴影
+    shadowColor: colors.shadow,
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
+    shadowOpacity: 0.30,
     shadowRadius: 6,
     elevation: 8,
   },
   shelfFabIcon: {
-    color: '#fff',
+    color: colors.textInverse,
     fontSize: 28,
     fontWeight: '500',
     lineHeight: 30,
@@ -1928,23 +1944,32 @@ const styles = StyleSheet.create({
   bottomSheetBackdrop: {
     position: 'absolute',
     top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
+    backgroundColor: colors.bgOverlay,
+    alignItems: 'center',     // 横向居中 (居中弹窗)
+    justifyContent: 'center',  // 纵向居中
   },
   bottomSheetContent: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    maxHeight: '50%', // 关键: 最大屏幕一半
-    paddingBottom: 16,
+    backgroundColor: colors.bgSecondary,
+    borderRadius: 16,         // 4 角统一小圆角 (居中弹窗, 不再是顶部圆角)
+    width: '85%',             // 居中宽度
+    height: 360,              // 固定高度 (用户要求)
+    overflow: 'hidden',       // 圆角内 ScrollView 不超出
+    // 浮雕上浮阴影
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    elevation: 10,
   },
   bottomSheetHandle: {
     width: 40,
     height: 4,
-    backgroundColor: '#ddd',
+    backgroundColor: colors.border,
     borderRadius: 2,
     alignSelf: 'center',
     marginTop: 8,
+    // 居中弹窗不需要底部 handle, 但保留样式定义以防兼容
+    // (JSX 渲染时已移除)
   },
   bottomSheetHeader: {
     flexDirection: 'row',
@@ -1954,16 +1979,16 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: colors.border,
   },
   bottomSheetTitle: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
+    color: colors.textPrimary,
   },
   bottomSheetClose: {
     fontSize: 18,
-    color: '#999',
+    color: colors.textMuted,
     paddingHorizontal: 8,
   },
   bottomSheetList: {
@@ -1975,41 +2000,41 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderBottomColor: colors.border,
   },
   bottomSheetItemActive: {
-    backgroundColor: '#e3f2fd',
+    backgroundColor: colors.accentBg,
   },
   bottomSheetRadio: {
     width: 20,
     height: 20,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: '#ccc',
+    borderColor: colors.textMuted,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
   },
   bottomSheetRadioActive: {
-    borderColor: '#1976d2',
+    borderColor: colors.accent,
   },
   bottomSheetRadioDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
   },
   bottomSheetItemName: {
     fontSize: 15,
-    color: '#333',
+    color: colors.textPrimary,
   },
   bottomSheetItemNameActive: {
-    color: '#1976d2',
+    color: colors.accent,
     fontWeight: '600',
   },
   bottomSheetItemMeta: {
     fontSize: 11,
-    color: '#999',
+    color: colors.textMuted,
     marginTop: 2,
   },
   // "类目：xxx ✕" 横排布局
@@ -2019,7 +2044,7 @@ const styles = StyleSheet.create({
   },
   shelfSelectorArrow: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
     marginLeft: 6,
   },
   // 清除筛选的 ✕ 按钮
@@ -2027,13 +2052,13 @@ const styles = StyleSheet.create({
     marginLeft: 6,
     width: 22,
     height: 22,
-    borderRadius: 11,
-    backgroundColor: '#ff5252',
+    borderRadius: 28,
+    backgroundColor: colors.danger,
     alignItems: 'center',
     justifyContent: 'center',
   },
   shelfSelectorClearButtonText: {
-    color: '#fff',
+    color: colors.textInverse,
     fontSize: 14,
     fontWeight: 'bold',
     lineHeight: 16,
@@ -2041,11 +2066,11 @@ const styles = StyleSheet.create({
   // 【类目筛选弹窗】相关样式
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: colors.bgOverlay,
     justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: '#fff',
+    backgroundColor: colors.bgSecondary,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     padding: 16,
@@ -2057,13 +2082,13 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#333',
+    color: colors.textPrimary,
     textAlign: 'center',
     marginBottom: 12,
   },
   categoryCurrentLabel: {
     fontSize: 13,
-    color: '#1976d2',
+    color: colors.accent,
     textAlign: 'center',
     marginBottom: 8,
   },
@@ -2072,23 +2097,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
+    paddingVertical: 14,
     paddingHorizontal: 16,
-    backgroundColor: '#f5f5f5',
-    borderRadius: 8,
+    backgroundColor: colors.accent,      // 整片薄荷绿实色 (不再用 box-shadow 模拟阴影)
+    borderRadius: 28,
     marginBottom: 10,
   },
   filterAllRowActive: {
-    backgroundColor: '#e3f2fd',
-    borderWidth: 1,
-    borderColor: '#1976d2',
+    backgroundColor: colors.accentHover,  // 选中态: 深一档薄荷绿
+    borderWidth: 2,
+    borderColor: colors.accentHover,
   },
   filterAllText: {
     fontSize: 15,
-    color: '#555',
+    color: colors.positionOccupiedText,   // 白字 (整片薄荷绿上文字)
   },
   filterAllTextActive: {
-    color: '#1976d2',
+    color: colors.positionOccupiedText,
     fontWeight: '600',
   },
   // 类目树
@@ -2100,7 +2125,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#fafafa',
+    backgroundColor: colors.bgSecondary,
     paddingVertical: 10,
     paddingHorizontal: 14,
     borderRadius: 6,
@@ -2109,11 +2134,11 @@ const styles = StyleSheet.create({
   positionBankHeaderText: {
     fontSize: 15,
     fontWeight: '500',
-    color: '#333',
+    color: colors.textPrimary,
   },
   positionBankHeaderArrow: {
     fontSize: 12,
-    color: '#666',
+    color: colors.textSecondary,
   },
   subCategoryList: {
     paddingLeft: 12,
@@ -2125,59 +2150,62 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 8,
     paddingHorizontal: 12,
-    backgroundColor: '#fff',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 4,
     marginBottom: 2,
   },
   subCategoryItemActive: {
-    backgroundColor: '#e3f2fd',
+    backgroundColor: colors.accentBg,
   },
   subCategoryItemText: {
     fontSize: 14,
-    color: '#333',
+    color: colors.textPrimary,
     flex: 1,
   },
   subCategoryItemTextActive: {
-    color: '#1976d2',
+    color: colors.accent,
     fontWeight: '600',
   },
   subCategoryItemCheck: {
     fontSize: 14,
-    color: '#1976d2',
+    color: colors.accent,
     fontWeight: 'bold',
   },
   subCategoryItemBig: {
     fontSize: 11,
-    color: '#999',
+    color: colors.textMuted,
     marginTop: 2,
   },
-  categorySearchInput: {
-    width: '100%',
-    height: 40,
-    backgroundColor: '#f5f5f5',
-    borderRadius: 8,
+  categorySearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  categorySearchField: {
+    flex: 1,
     fontSize: 14,
-    marginBottom: 12,
+    color: colors.textPrimary,
+    paddingVertical: 0,
   },
   searchResultList: {
     paddingVertical: 4,
   },
   searchEmptyText: {
     fontSize: 14,
-    color: '#999',
+    color: colors.textMuted,
     textAlign: 'center',
     paddingVertical: 20,
   },
   modalCancelButton: {
-    backgroundColor: '#f5f5f5',
+    backgroundColor: colors.bgElevated,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
   },
   modalCancelButtonText: {
     fontSize: 15,
-    color: '#555',
+    color: colors.textSecondary,
     fontWeight: '500',
   },
   shelfDropdown: {
@@ -2186,11 +2214,11 @@ const styles = StyleSheet.create({
     left: 16,
     right: 16,
     marginTop: 8,
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
-    shadowColor: '#000',
+    borderColor: colors.border,
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 4,
@@ -2204,17 +2232,17 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#f5f5f5',
+    borderBottomColor: colors.border,
   },
   shelfDropdownItemSelected: {
-    backgroundColor: '#e3f2fd',
+    backgroundColor: colors.accentBg,
   },
   shelfDropdownItemText: {
     fontSize: 16,
-    color: '#333',
+    color: colors.textPrimary,
   },
   shelfDropdownItemTextSelected: {
-    color: '#1976d2',
+    color: colors.accent,
     fontWeight: '700',
   },
   // 搜索容器样式
@@ -2227,17 +2255,23 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    backgroundColor: 'white',
-    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
     paddingVertical: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
+    minHeight: 40,             // 略低于底栏 64, 与底栏凸起形成"凹下去"对比
+    // 无背景/无外阴影，透出 InsetShadow 容器的 colors.bg 同色凹槽
+    backgroundColor: 'transparent',
+  },
+  searchInputField: {
+    flex: 1,
     fontSize: 16,
-    marginRight: 10,
+    padding: 0,
+    minHeight: 22,           // 兜底: Android 上 padding:0 + flex:1 会塌缩高度
+    color: colors.textPrimary,
   },
   clearSearchButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 12,
@@ -2246,7 +2280,7 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   clearSearchButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 14,
     fontWeight: '600',
   },
@@ -2262,14 +2296,14 @@ const styles = StyleSheet.create({
   searchHistoryTitle: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#666',
+    color: colors.textSecondary,
   },
   clearHistoryButton: {
     fontSize: 14,
-    color: '#1976d2',
+    color: colors.accent,
   },
   historyTag: {
-    backgroundColor: '#e3f2fd',
+    backgroundColor: colors.accentBg,
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 20,
@@ -2277,23 +2311,23 @@ const styles = StyleSheet.create({
   },
   historyTagText: {
     fontSize: 14,
-    color: '#1976d2',
+    color: colors.accent,
   },
   suggestionsContainer: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: colors.border,
     marginTop: 8,
   },
   suggestionItem: {
     padding: 14,
     borderBottomWidth: 1,
-    borderBottomColor: '#f5f5f5',
+    borderBottomColor: colors.border,
   },
   suggestionText: {
     fontSize: 16,
-    color: '#333',
+    color: colors.textPrimary,
   },
   // 设备标签样式
   tagsContainer: {
@@ -2314,26 +2348,37 @@ const styles = StyleSheet.create({
     height: 8,
   },
   deviceTag: {
-    backgroundColor: 'white',
-    // 微信风格: 无圆角, 无阴影
+    backgroundColor: colors.bg,  // 与页面背景同色, 消除"白底突兀感"
+    // VI 浮雕：大圆角 + 上浮阴影，肉眼浮雕效果
+    borderRadius: 28,
+    marginHorizontal: 8,
+    marginVertical: 6,
     padding: 12,
     flexDirection: 'row',
-    alignItems: 'flex-start',  // 与图片顶端对齐, 后续 space-between 才能精确贴顶/贴底
-    minHeight: 94,  // 70 (方图) + 12*2 (padding)
+    alignItems: 'flex-start',
+    minHeight: 94,
     position: 'relative',
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    elevation: 8,
   },
   litDeviceTag: {
-    backgroundColor: '#98ee9cff',
-    // 微信风格: 无圆角, 无阴影
+    // 嵌入选中态：亮绿 #6EE8B7 + 上浮阴影
+    backgroundColor: colors.ledColor,
+    shadowOpacity: 0.14,
+    shadowRadius: 10,
+    elevation: 5,
   },
   // 左侧方图(圆角, 固定 70x70)
   deviceTagImageWrap: {
     width: 70,
     height: 70,
     borderRadius: 10,  // 圆角
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.bg,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: colors.border,
     marginRight: 12,
     overflow: 'hidden',
     justifyContent: 'center',
@@ -2351,7 +2396,7 @@ const styles = StyleSheet.create({
   // ========== 器件图片全屏放大 Modal 样式 (与 ImageUploadField 保持一致) ==========
   imageZoomBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.92)',
+    backgroundColor: colors.viewerBg,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -2366,19 +2411,19 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: colors.viewerControlBg,
     justifyContent: 'center',
     alignItems: 'center',
   },
   imageZoomCloseText: {
-    color: '#fff',
+    color: colors.textInverse,
     fontSize: 22,
     lineHeight: 24,
   },
   imageZoomHint: {
     position: 'absolute',
     bottom: 36,
-    color: 'rgba(255,255,255,0.55)',
+    color: colors.viewerControlText,
     fontSize: 13,
   },
   // 默认占位（用户未上传图片时显示）
@@ -2387,7 +2432,7 @@ const styles = StyleSheet.create({
     height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#fafafa',
+    backgroundColor: colors.bgSecondary,
   },
   deviceTagImagePlaceholderIcon: {
     fontSize: 22,
@@ -2395,7 +2440,7 @@ const styles = StyleSheet.create({
   },
   deviceTagImagePlaceholderText: {
     fontSize: 10,
-    color: '#999',
+    color: colors.textMuted,
     marginTop: 2,
   },
   // 右侧字段堆叠容器(3 行: 编号+类目 / 名称 / 位置+数量)
@@ -2408,12 +2453,12 @@ const styles = StyleSheet.create({
   // 普通字段(小字号)
   deviceTagMeta: {
     fontSize: 12,
-    color: '#666',
+    color: colors.textSecondary,
     lineHeight: 16,
   },
   // 数量为 0 时显示"缺货"灰态
   deviceTagQtyZero: {
-    color: '#ef4444',
+    color: colors.danger,
     fontWeight: '600',
   },
   // 第一行: 编号 + 类目(flex 同行, 编号不被挤, 类目允许被压, y 中心对齐)
@@ -2425,7 +2470,7 @@ const styles = StyleSheet.create({
   deviceTagName: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#1976d2',
+    color: colors.accent,
     lineHeight: 22,
   },
   // 名称居中容器
@@ -2436,7 +2481,7 @@ const styles = StyleSheet.create({
   },
   // 亮灯时名称高亮
   deviceTagNameLit: {
-    color: '#0d47a1',
+    color: colors.textInverse,
   },
   // 第三行: 位置 + 数量(flex 同行, 位置不被挤, 数量允许被压, y 中心对齐)
   deviceTagRowBottom: {
@@ -2448,12 +2493,12 @@ const styles = StyleSheet.create({
     marginLeft: 24,  // 2 字符宽度间距
   },
   addButton: {
-    backgroundColor: '#1976d2',  // 跟扫码按钮颜色一致
+    backgroundColor: colors.accent,  // 跟扫码按钮颜色一致
     // 不再覆盖 flex/padding/borderRadius/alignItems, 让 controlAllButton 决定布局
     // → 4 个按钮完全等高 / 等宽 / 同圆角
   },
   addButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 14,
     fontWeight: 'bold',
   },
@@ -2468,17 +2513,17 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 4,
     borderWidth: 2,
-    borderColor: '#ddd',
+    borderColor: colors.border,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
   },
   checkboxSelected: {
-    backgroundColor: '#2196F3',
-    borderColor: '#2196F3',
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
   checkmark: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -2490,10 +2535,6 @@ const styles = StyleSheet.create({
     minHeight: 300,
   },
   emptyIconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#E3F2FD',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
@@ -2504,33 +2545,33 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#333',
+    color: colors.textPrimary,
     marginBottom: 12,
     textAlign: 'center',
   },
   emptySubtitle: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
     textAlign: 'center',
     marginBottom: 24,
     lineHeight: 20,
   },
   emptyPrimaryButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     paddingHorizontal: 32,
     paddingVertical: 12,
-    borderRadius: 24,
+    borderRadius: 28,
     marginTop: 4,
     marginBottom: 16,
   },
   emptyPrimaryButtonText: {
-    color: '#fff',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: '600',
   },
   emptyHint: {
-    fontSize: 12,
-    color: '#999',
+    fontSize: 14,
+    color: colors.textSecondary,
     textAlign: 'center',
   },
   loadingContainer: {
@@ -2542,7 +2583,7 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     fontSize: 16,
-    color: '#666',
+    color: colors.textSecondary,
     marginTop: 16,
   },
   // 成功消息样式
@@ -2551,13 +2592,13 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#4CD964',
+    backgroundColor: colors.success,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 16,
     paddingHorizontal: 20,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
@@ -2572,7 +2613,7 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   successMessageText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -2587,20 +2628,26 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 10,
     paddingHorizontal: 4,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
+    // 上浮阴影 (薄荷绿按钮 + 底栏/其它上浮元素统一)
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 5,
   },
   controlAllOnButton: {
-    backgroundColor: '#4caf50',
+    backgroundColor: colors.success,
   },
   controlAllOffButton: {
-    backgroundColor: '#f44336',
+    backgroundColor: colors.danger,
   },
   controlAllScanButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
   },
   controlAllButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 15,
     fontWeight: '600',
   },

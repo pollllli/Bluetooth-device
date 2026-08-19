@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import StorageService from '../services/StorageService';
+import colors from '../theme/colors';
 
 const DeviceDetailScreen = ({ navigation, route }) => {
   const { device, isAdmin } = route.params || { device: {}, isAdmin: false };
@@ -183,14 +184,14 @@ const DeviceDetailScreen = ({ navigation, route }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
+    backgroundColor: colors.bg,
     padding: 16,
   },
   deviceCard: {
-    backgroundColor: 'white',
-    borderRadius: 16,
+    backgroundColor: colors.bgSecondary,
+    borderRadius: 8,
     padding: 24,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
@@ -200,7 +201,7 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   deviceIdContainer: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     alignSelf: 'flex-start',
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -219,7 +220,7 @@ const styles = StyleSheet.create({
   },
   deviceFunction: {
     fontSize: 16,
-    color: '#666',
+    color: colors.textSecondary,
     marginBottom: 24,
   },
   sectionContainer: {
@@ -228,11 +229,11 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#333',
+    color: colors.textPrimary,
     marginBottom: 12,
     paddingBottom: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
+    borderBottomColor: colors.border,
   },
   infoRow: {
     flexDirection: 'row',
@@ -241,12 +242,12 @@ const styles = StyleSheet.create({
   infoLabel: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#666',
+    color: colors.textSecondary,
     width: 60,
   },
   infoValue: {
     fontSize: 16,
-    color: '#333',
+    color: colors.textPrimary,
     flex: 1,
   },
   buttonContainer: {
@@ -255,13 +256,13 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   sendButton: {
-    backgroundColor: '#4caf50',
+    backgroundColor: colors.success,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 28,
     alignItems: 'center',
     flex: 1,
     marginRight: 10,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
@@ -271,13 +272,13 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   takeOutButton: {
-    backgroundColor: '#f44336',
+    backgroundColor: colors.danger,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 28,
     alignItems: 'center',
     flex: 1,
     marginLeft: 10,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
@@ -287,7 +288,7 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   sendButtonDisabled: {
-    backgroundColor: '#ccc',
+    backgroundColor: colors.textMuted,
   },
   sendButtonText: {
     color: 'white',
@@ -300,11 +301,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   editButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 28,
     alignItems: 'center',
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,

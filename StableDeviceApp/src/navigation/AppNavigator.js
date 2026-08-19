@@ -2,7 +2,7 @@ import React from 'react';
 import { Image, View, StyleSheet, TouchableOpacity, Text } from 'react-native';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
 import DeviceListScreen from '../screens/DeviceListScreen';
 import DeviceDetailScreen from '../screens/DeviceDetailScreen';
 import AdminEditScreen from '../screens/AdminEditScreen';
@@ -14,6 +14,8 @@ import ScanScreen from '../screens/ScanScreen';
 import CategoryManagementScreen from '../screens/CategoryManagementScreen';
 import ShelfManagerScreen from '../screens/ShelfManagerScreen';
 import { useUser } from '../context/UserContext';
+import colors from '../theme/colors';
+import RaisedShadow from '../components/RaisedShadow';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -34,8 +36,8 @@ const sendLightOff = async () => {
   }
 };
 
-// 渲染 tab 图标：彩色实心图
-// 激活时轻微放大 + 加阴影，未激活时正常
+// 渲染 tab 图标: 用 assets/tab-icons 下的本地 PNG (require 静态资源)
+// 激活时轻微放大+满色, 未激活时正常+淡色
 const renderTabIcon = (iconSource) => ({ focused }) => (
   <View style={tabIconStyles.wrapper}>
     <Image
@@ -59,7 +61,7 @@ const tabIconStyles = StyleSheet.create({
   icon: {
     width: 24,
     height: 24,
-    opacity: 0.6, // 未激活时淡一点
+    opacity: 0.4, // 未激活时淡一点
   },
   iconFocused: {
     width: 28,
@@ -68,34 +70,75 @@ const tabIconStyles = StyleSheet.create({
   },
 });
 
+/**
+ * TabBarInner - 包一层 BottomTabBar
+ * 显式传 baseStyle (我们的圆角+同色+height:64), 忽略 props.style,
+ * 避免 RN 内部透传的 tabBarStyle 覆盖我们的关键属性 (height/backgroundColor/borderRadius)
+ */
+const TabBarInner = (props) => (
+  <BottomTabBar {...props} style={props.baseStyle} />
+);
+
 // 主标签导航
 const MainTabNavigator = () => {
   const { user } = useUser();
   const isAdmin = user?.isAdmin || false;
   const username = user?.username || 'user';
 
-  // 4 个 tab 全部常驻, 库存数影响由 ConnectionScreen / BOMScreen 自己监听处理
-
-  // 关键: 共享的 tabBarStyle, 所有 tab 必须用同一个, 高度才不会切 tab 时跳变
-  // 之前 Connection/BOM 用 `tabBarStyle: hasShelves ? undefined : { display: 'none' }`,
-  // undefined 在 React Navigation v5 里被当「清空样式」, 不会回退到 screenOptions.tabBarStyle,
-  // 导致这俩 tab 用了平台默认高度 49 (系统默认). 库存/设置 没踩这个坑是因为它们没设 tabBarStyle
-  const baseTabBarStyle = {
-    backgroundColor: '#f5f5f5',
-    borderTopWidth: 1,
-    borderTopColor: '#ddd',
-    height: 60,
-    paddingBottom: 4,
-  };
   // 4 个 tab 全部常驻: 0 库存时也允许用户进"连接"和"BOM"页,
   // 由页内空状态提示"当前无库存, 请先新建或导入库存".
-  // 不要再用 tabBarButton: () => null 隐藏 tab — 那种会偷走用户入口
+
+  // 大圆角悬浮导航框: 与页面同色, 左上亮色高光棱 + 右下深色软落影 (光源左上)
+  // Neumorphism 风格: 外阴影极弱, 凸起感完全由内部边缘渐变承担
+  const tabBarContainerStyle = {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 16,
+    height: 64,                  // 显式兜底, 防止内部任何组件塌缩导致整条链消失
+    borderRadius: 28,            // 大圆角
+    overflow: 'hidden',
+    backgroundColor: colors.bg,   // 与页面同色 (Android 投影也需要非透明背景)
+    // iOS 方向性外阴影 (轻微右下投影, 营造"略高于背景"的浮起感, 不抢内部高光的戏)
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 2, height: 4 },
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    // Android 上浮
+    elevation: 4,
+  };
+
+  // 内部 BottomTabBar 样式: 与外层 RaisedShadow 同色同圆角, 保持视觉连续
+  const baseTabBarStyle = {
+    backgroundColor: colors.bg,   // 与外层 RaisedShadow 容器同色, 避免矩形色块感
+    borderTopWidth: 0,
+    borderBottomWidth: 0,
+    borderLeftWidth: 0,
+    borderRightWidth: 0,
+    borderRadius: 28,            // 与外层一致, 消除"内方外圆"的割裂感
+    height: 64,                  // 显式高度, 撑起整条 BottomTabBar
+    paddingBottom: 8,
+    paddingTop: 8,
+  };
 
   return (
     <Tab.Navigator
+      tabBar={(props) => (
+        <View style={tabBarContainerStyle} pointerEvents="box-none">
+          <RaisedShadow
+            backgroundColor={colors.bg}
+            borderRadius={28}
+            inset={8}
+          >
+            <TabBarInner {...props} baseStyle={baseTabBarStyle} />
+          </RaisedShadow>
+        </View>
+      )}
       screenOptions={{
-        tabBarActiveTintColor: '#007AFF',
-        tabBarInactiveTintColor: '#999',
+        tabBarActiveTintColor: colors.tabActive,
+        tabBarInactiveTintColor: colors.tabInactive,
+        // 用 baseTabBarStyle, 不要用 display:none —— 那样会让 BottomTabBar 高度塌成 0
+        // 真实渲染由自定义 tabBar prop 接管, 这里只是给 BottomTabBar 一个合理默认 style
         tabBarStyle: baseTabBarStyle,
         tabBarLabelStyle: {
           fontSize: 14,
@@ -120,7 +163,6 @@ const MainTabNavigator = () => {
           title: '连接',
           tabBarTestID: 'tab-connection',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bluetooth.png')),
-          tabBarStyle: baseTabBarStyle,
         }}
       />
       <Tab.Screen
@@ -129,7 +171,6 @@ const MainTabNavigator = () => {
           title: 'BOM匹配',
           tabBarTestID: 'tab-bom',
           tabBarIcon: renderTabIcon(require('../../assets/tab-icons/bom.png')),
-          tabBarStyle: baseTabBarStyle,
         }}
       >
         {(props) => <BOMScreen {...props} isAdmin={isAdmin} />}
@@ -174,13 +215,13 @@ const AppNavigator = () => {
         initialRouteName="MainTabs"
         screenOptions={{
           headerStyle: {
-            backgroundColor: '#f5f5f5',
+            backgroundColor: colors.headerBg,
             elevation: 0,
             shadowOpacity: 0,
             borderBottomWidth: 1,
-            borderBottomColor: '#e0e0e0',
+            borderBottomColor: colors.headerBorder,
           },
-          headerTintColor: '#333',
+          headerTintColor: colors.headerText,
           headerTitleStyle: {
             fontWeight: '600',
             fontSize: 18,
@@ -246,7 +287,7 @@ const AppNavigator = () => {
                   navigation.navigate('MainTabs', { screen: 'DeviceListTab' });
                 }}
               >
-                <Text style={{ color: '#333', fontSize: 16 }}>← 返回</Text>
+                <Text style={{ color: colors.headerText, fontSize: 18 }}>←</Text>
               </TouchableOpacity>
             ),
           })}

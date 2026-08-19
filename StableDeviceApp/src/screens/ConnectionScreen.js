@@ -1,4 +1,4 @@
-/**
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿/**
  * 蓝牙连接页面组件
  * 
  * 功能说明：
@@ -25,6 +25,7 @@ import {
 import BluetoothHandler from '../services/BluetoothHandler';
 import StorageService from '../services/StorageService';
 import ShelfService from '../services/ShelfService';
+import colors from '../theme/colors';
 
 /**
  * 按信号强度（RSSI）降序排序设备列表
@@ -629,23 +630,13 @@ const ConnectionScreen = ({ navigation, route }) => {
     </TouchableOpacity>
   );
 
-  // ========== 0 库存: 顶部小黄条提示, 不阻挡操作 ==========
-  // 用户在 0 库存时仍可进入此页 + 看到完整 UI, 但点扫描时会被拦截
-  const EmptyShelfBanner = !hasShelves ? (
-    <View style={styles.emptyShelfBanner}>
-      <Text style={styles.emptyShelfBannerText}>
-        ⚠️ 当前无库存 — 扫描后无法绑定到库存, 请先到"设置"新建或导入库存
-      </Text>
-    </View>
-  ) : null;
+  // ========== 界面渲染 ==========
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>蓝牙连接</Text>
       </View>
-
-      {EmptyShelfBanner}
 
       <View style={styles.connectionStatus}>
         <View style={styles.statusRow}>
@@ -705,40 +696,45 @@ const ConnectionScreen = ({ navigation, route }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.bg,
     paddingTop: 60,
   },
   header: {
-    backgroundColor: '#e0e0e0',
-    padding: 16,
+    backgroundColor: colors.bgSecondary,
+    paddingTop: 4,
+    paddingBottom: 6,
+    paddingHorizontal: 16,
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-    marginTop: 10,
+    borderBottomColor: colors.border,
+    marginTop: 4,
   },
   title: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#000',
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '600',
+    color: colors.textPrimary,
   },
   connectionStatus: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: 'white',
+    height: 64,                       // 与底部导航栏等高 (同 tabBarContainerStyle.height)
+    paddingHorizontal: 16,            // 高度由 height 控制, 不再用 paddingVertical
+    paddingVertical: 0,
+    backgroundColor: colors.bgSecondary,
     marginHorizontal: 20,
     marginTop: 20,
     marginBottom: 20,
-    borderRadius: 12,
-    shadowColor: '#000',
+    borderRadius: 28,                 // 与底部导航栏/搜索框圆角一致 (pill 形)
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
     },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOpacity: 0.14,
+    shadowRadius: 12,
+    elevation: 7,
   },
   statusRow: {
     flexDirection: 'row',
@@ -752,48 +748,50 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   statusDotConnected: {
-    backgroundColor: '#4caf50',
+    backgroundColor: colors.success,
   },
   statusDotDisconnected: {
-    backgroundColor: '#f44336',
+    backgroundColor: colors.danger,
   },
   statusText: {
     fontSize: 16,
     fontWeight: '600',
     flex: 1,
+    color: colors.textPrimary,
   },
   disconnectButton: {
-    backgroundColor: '#f44336',
+    backgroundColor: colors.danger,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 8,
+    borderRadius: 28,                 // pill 形圆角按钮 (与底栏/连接框圆角一致)
+    overflow: 'hidden',               // 保证 pill 形状不被内部元素撑破
     marginLeft: 10,
   },
   disconnectButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontWeight: '600',
   },
   scanButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 28,
     alignItems: 'center',
     marginHorizontal: 20,
     marginBottom: 20,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
     },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOpacity: 0.14,
+    shadowRadius: 12,
+    elevation: 7,
   },
   scanButtonDisabled: {
-    backgroundColor: '#8e8e93',
+    backgroundColor: colors.textMuted,
   },
   scanButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: '600',
   },
@@ -802,18 +800,19 @@ const styles = StyleSheet.create({
     marginHorizontal: 20,
   },
   deviceItem: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 8,
     marginBottom: 12,
-    shadowColor: '#000',
+    marginHorizontal: 8,        // 与库存 deviceTag 一致 (总左右占位 16+16=32, 与库存屏占一致)
+    shadowColor: colors.shadow,
     shadowOffset: {
       width: 0,
       height: 2,
     },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOpacity: 0.14,
+    shadowRadius: 12,
+    elevation: 7,
   },
   deviceInfo: {
     flex: 1,
@@ -822,27 +821,26 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     marginBottom: 8,
+    color: colors.textPrimary,
   },
   deviceId: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
     marginBottom: 8,
   },
   deviceRssi: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
   },
   emptyText: {
     textAlign: 'center',
     marginTop: 30,
-    color: '#666',
-    fontSize: 16,
+    color: colors.textSecondary,
+    fontSize: 14,
   },
   // ========== 0 库存小黄条样式 (提示但不阻挡操作) ==========
   emptyShelfBanner: {
-    backgroundColor: '#fff3cd',
-    borderLeftWidth: 4,
-    borderLeftColor: '#ff9800',
+    backgroundColor: colors.warningBg,
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginHorizontal: 12,
@@ -850,7 +848,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   emptyShelfBannerText: {
-    color: '#856404',
+    color: colors.warning,
     fontSize: 13,
     lineHeight: 18,
   },

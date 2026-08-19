@@ -1,4 +1,4 @@
-/**
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿/**
  * 个人中心页面组件
  * 
  * 功能说明：
@@ -32,6 +32,7 @@ import ShelfService from '../services/ShelfService';
 import { setPendingAutoConnect } from '../utils/pendingAutoConnect';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { useUser } from '../context/UserContext';
+import colors from '../theme/colors';
 
 const ProfileScreen = ({ navigation, route }) => {
   // 获取用户上下文
@@ -54,6 +55,8 @@ const ProfileScreen = ({ navigation, route }) => {
   // 1.6.3: 导入进度弹窗 (替代原来只用 console.log 看不到进度的体验)
   const [importProgress, setImportProgress] = useState(null); // {fileName, deviceCount, read, total} | null
   const importCancelRef = useRef({ cancelled: false });
+  // 数据导入确认弹窗 (替代系统 Alert, 统一圆角风格)
+  const [showImportConfirm, setShowImportConfirm] = useState(false);
   // 1.6.5: 流式导出进度 (300+ 器件导出可能要十几秒, 给用户进度反馈)
   const [exportProgress, setExportProgress] = useState(null); // {current, total, shelfName, message, shelfIndex, shelfTotal} | null
 
@@ -73,8 +76,8 @@ const ProfileScreen = ({ navigation, route }) => {
    */
   const handleAbout = () => {
     Alert.alert(
-      '关于',
-      '器件管理系统 v1.2.3\n\n用于管理电子器件的库存和取用\n\n© 2026 器件管理系统'
+      'PartLit',
+      'PartLit v1.2.3\n\n用于管理电子器件的库存和取用\n\n© 2026 PartLit'
     );
   };
 
@@ -323,150 +326,157 @@ const ProfileScreen = ({ navigation, route }) => {
     // 用 .catch 兜底: 即使蓝牙断/模块未注册也不阻塞用户操作
     try { await ShelfService.clearBomAndLights(); } catch (e) { /* ignore */ }
 
-    Alert.alert(
-      '数据导入',
-      '系统将根据文件名判断:\n• 同名库存 → 覆盖该库存的器件\n• 异名库存 → 自动新增为新库存\n\n此操作不会影响其他库存。',
-      [
-        { text: '取消', style: 'cancel' },
-        {
-          text: '选择文件',
-          onPress: async () => {
-            try {
-              const result = await DocumentPicker.getDocumentAsync({
-                type: 'application/json',
-                copyToCacheDirectory: true,
-              });
+    setShowImportConfirm(true);
+  };
 
-              if (result.canceled) {
-                return;
-              }
+  // 弹窗内点击"选择文件": 关闭弹窗后真正进入选文件/导入流程
+  const handleImportConfirmPick = () => {
+    setShowImportConfirm(false);
+    // 等弹窗关闭动画结束再触发系统文件选择器, 避免两个动画叠加
+    setTimeout(() => {
+      performImport();
+    }, 200);
+  };
 
-              const fileUri = result.assets[0].uri;
-              // 关键: 优先用系统返回的文件名, 这样"按文件名判断"才有效
-              const fileName = result.assets[0].name || 'imported.json';
+  // 弹窗内点击"取消"
+  const handleImportConfirmCancel = () => {
+    setShowImportConfirm(false);
+  };
 
-              // 1.6.3: 重置取消标志, 显示进度弹窗
-              importCancelRef.current.cancelled = false;
-              setImportProgress({ fileName, deviceCount: 0, read: 0, total: 0, phase: 'prepare', message: '准备导入...' });
+  // 实际的文件选择 + 流式导入流程
+  const performImport = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/json',
+        copyToCacheDirectory: true,
+      });
 
-              // 1.4 阶段 2: 直接把 fileUri 喂给流式导入, 不预先 readAsStringAsync + JSON.parse
-              // 旧方案 41MB 文件要把整个 JSON 加载到内存再解析 (100MB+ 直接 OOM)
-              // 新方案走 fetch + arrayBuffer + 64KB 分块喂 StreamParser, 内存峰值 < 10MB
-              let importResult;
-              try {
-                importResult = await StorageService.streamImportShelfFromFile(
-                  fileUri,
-                  fileName,
-                  {
-                    onProgress: (p) => {
-                      // 1.6.6: 处理所有阶段 (reading/parsing/devices-done/done),
-                      //   老代码只处理 'reading', 导致文件读完后进度条卡住不动
-                      setImportProgress((prev) => {
-                        if (!prev) return prev;
-                        if (p.phase === 'reading') {
-                          return {
-                            ...prev,
-                            phase: 'reading',
-                            deviceCount: p.deviceCount || 0,
-                            read: p.read || 0,
-                            total: p.total || 0,
-                            message: '正在读取文件...',
-                          };
-                        }
-                        if (p.phase === 'parsing') {
-                          // 文件已读完, 正在解析; 进度条保持 100%, 状态文字变化
-                          return {
-                            ...prev,
-                            phase: 'parsing',
-                            deviceCount: p.deviceCount || 0,
-                            read: prev.total || 0,
-                            total: prev.total || 0,
-                            message: '正在解析数据...',
-                          };
-                        }
-                        if (p.phase === 'devices-done' || p.phase === 'done') {
-                          return {
-                            ...prev,
-                            phase: p.phase,
-                            deviceCount: p.deviceCount || 0,
-                            read: prev.total || 0,
-                            total: prev.total || 0,
-                            message: p.message || (p.phase === 'done' ? '导入完成' : '正在保存数据...'),
-                          };
-                        }
-                        return prev;
-                      });
-                    },
-                    isCancelled: () => importCancelRef.current.cancelled,
-                  }
-                );
-              } catch (importErr) {
-                setImportProgress(null);
-                // 取消是用户主动行为, 静默返回, 不弹错误
-                if (importErr?.message === '导入已取消') {
-                  console.log('[handleImportData] 用户取消导入');
-                  return;
+      if (result.canceled) {
+        return;
+      }
+
+      const fileUri = result.assets[0].uri;
+      // 关键: 优先用系统返回的文件名, 这样"按文件名判断"才有效
+      const fileName = result.assets[0].name || 'imported.json';
+
+      // 1.6.3: 重置取消标志, 显示进度弹窗
+      importCancelRef.current.cancelled = false;
+      setImportProgress({ fileName, deviceCount: 0, read: 0, total: 0, phase: 'prepare', message: '准备导入...' });
+
+      // 1.4 阶段 2: 直接把 fileUri 喂给流式导入, 不预先 readAsStringAsync + JSON.parse
+      // 旧方案 41MB 文件要把整个 JSON 加载到内存再解析 (100MB+ 直接 OOM)
+      // 新方案走 fetch + arrayBuffer + 64KB 分块喂 StreamParser, 内存峰值 < 10MB
+      let importResult;
+      try {
+        importResult = await StorageService.streamImportShelfFromFile(
+          fileUri,
+          fileName,
+          {
+            onProgress: (p) => {
+              // 1.6.6: 处理所有阶段 (reading/parsing/devices-done/done),
+              //   老代码只处理 'reading', 导致文件读完后进度条卡住不动
+              setImportProgress((prev) => {
+                if (!prev) return prev;
+                if (p.phase === 'reading') {
+                  return {
+                    ...prev,
+                    phase: 'reading',
+                    deviceCount: p.deviceCount || 0,
+                    read: p.read || 0,
+                    total: p.total || 0,
+                    message: '正在读取文件...',
+                  };
                 }
-                throw importErr;
-              }
-              setImportProgress(null);
+                if (p.phase === 'parsing') {
+                  // 文件已读完, 正在解析; 进度条保持 100%, 状态文字变化
+                  return {
+                    ...prev,
+                    phase: 'parsing',
+                    deviceCount: p.deviceCount || 0,
+                    read: prev.total || 0,
+                    total: prev.total || 0,
+                    message: '正在解析数据...',
+                  };
+                }
+                if (p.phase === 'devices-done' || p.phase === 'done') {
+                  return {
+                    ...prev,
+                    phase: p.phase,
+                    deviceCount: p.deviceCount || 0,
+                    read: prev.total || 0,
+                    total: prev.total || 0,
+                    message: p.message || (p.phase === 'done' ? '导入完成' : '正在保存数据...'),
+                  };
+                }
+                return prev;
+              });
+            },
+            isCancelled: () => importCancelRef.current.cancelled,
+          }
+        );
+      } catch (importErr) {
+        setImportProgress(null);
+        // 取消是用户主动行为, 静默返回, 不弹错误
+        if (importErr?.message === '导入已取消') {
+          console.log('[handleImportData] 用户取消导入');
+          return;
+        }
+        throw importErr;
+      }
+      setImportProgress(null);
 
-              // 导入完成后清空库存缓存, 重新加载
-              ShelfService.clearShelvesCache();
+      // 导入完成后清空库存缓存, 重新加载
+      ShelfService.clearShelvesCache();
 
-              // 关键: 把"目标库存"绑定的蓝牙标记为待自动连
-              // DeviceListScreen 获得焦点时会消费这个标记, 后台静默连, 不弹切库提示
-              // streamImportShelfFromFile 返回 sourceBluetoothMac (新命名), 老 importShelfFromFile 返回 bluetoothMac
-              const mac = importResult.sourceBluetoothMac || importResult.bluetoothMac || '';
-              const bname = importResult.sourceBluetoothName || importResult.bluetoothName || '';
-              if (mac) {
-                setPendingAutoConnect(mac, bname);
-                console.log('[handleImportData] 标记待自动连:', mac, bname);
-              }
+      // 关键: 把"目标库存"绑定的蓝牙标记为待自动连
+      // DeviceListScreen 获得焦点时会消费这个标记, 后台静默连, 不弹切库提示
+      // streamImportShelfFromFile 返回 sourceBluetoothMac (新命名), 老 importShelfFromFile 返回 bluetoothMac
+      const mac = importResult.sourceBluetoothMac || importResult.bluetoothMac || '';
+      const bname = importResult.sourceBluetoothName || importResult.bluetoothName || '';
+      if (mac) {
+        setPendingAutoConnect(mac, bname);
+        console.log('[handleImportData] 标记待自动连:', mac, bname);
+      }
 
-              const actionLabel = importResult.action === 'add' ? '已新建' : '已覆盖';
-              const imageHint = importResult.restoredImageCount
-                ? `\n已恢复 ${importResult.restoredImageCount} 张图片`
-                : '';
-              Alert.alert(
-                '导入成功',
-                `${actionLabel}库存「${importResult.shelfName}」\n导入 ${importResult.deviceCount} 个器件${imageHint}`,
-                [
+      const actionLabel = importResult.action === 'add' ? '已新建' : '已覆盖';
+      const imageHint = importResult.restoredImageCount
+        ? `\n已恢复 ${importResult.restoredImageCount} 张图片`
+        : '';
+      Alert.alert(
+        '导入成功',
+        `${actionLabel}库存「${importResult.shelfName}」\n导入 ${importResult.deviceCount} 个器件${imageHint}`,
+        [
+          {
+            text: '确定',
+            onPress: () => {
+              // 跳到库存首页 (DeviceListTab 是 Tab.Navigator 的第一个 tab, 即默认 tab)
+              // 切库动作在 streamImportShelfFromFile 内部已完成, 这里只负责跳转 UI
+              navigation.reset({
+                index: 0,
+                routes: [
                   {
-                    text: '确定',
-                    onPress: () => {
-                      // 跳到库存首页 (DeviceListTab 是 Tab.Navigator 的第一个 tab, 即默认 tab)
-                      // 切库动作在 streamImportShelfFromFile 内部已完成, 这里只负责跳转 UI
-                      navigation.reset({
-                        index: 0,
-                        routes: [
-                          {
-                            name: 'MainTabs',
-                            params: { screen: 'DeviceListTab' },
-                          },
-                        ],
-                      });
-                    },
+                    name: 'MainTabs',
+                    params: { screen: 'DeviceListTab' },
                   },
-                ]
-              );
-            } catch (error) {
-              logError('导入数据失败', error, 'ProfileScreen.handleImportData');
-              Alert.alert(
-                '错误',
-                `导入数据失败: ${error.message || '请检查文件格式并重试'}`
-              );
-            }
+                ],
+              });
+            },
           },
-        },
-      ]
-    );
+        ]
+      );
+    } catch (error) {
+      logError('导入数据失败', error, 'ProfileScreen.handleImportData');
+      Alert.alert(
+        '错误',
+        `导入数据失败: ${error.message || '请检查文件格式并重试'}`
+      );
+    }
   };
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>设置</Text>
+        <Text style={styles.headerTitle}>PartLit</Text>
       </View>
 
       <ScrollView style={styles.content}>
@@ -495,7 +505,7 @@ const ProfileScreen = ({ navigation, route }) => {
             style={[styles.menuItem, styles.lastMenuItem]}
             onPress={handleAbout}
           >
-            <Text style={styles.menuText}>关于</Text>
+            <Text style={styles.menuText}>PartLit</Text>
             <Text style={styles.menuArrow}>›</Text>
           </TouchableOpacity>
         </View>
@@ -705,8 +715,39 @@ const ProfileScreen = ({ navigation, route }) => {
                 <Text style={styles.importProgressCancelButtonText}>取消</Text>
               </TouchableOpacity>
               <View style={styles.importProgressSpinnerBox}>
-                <ActivityIndicator size="small" color="#007AFF" />
+                <ActivityIndicator size="small" color={colors.accent} />
               </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 数据导入确认弹窗 (替代系统 Alert, 圆角风格与全站统一, 无文字提示) */}
+      <Modal
+        visible={showImportConfirm}
+        transparent={true}
+        animationType="fade"
+        statusBarTranslucent={true}
+        onRequestClose={handleImportConfirmCancel}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>数据导入</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={handleImportConfirmCancel}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.cancelButtonText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.submitButton]}
+                onPress={handleImportConfirmPick}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.submitButtonText}>选择文件</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -747,7 +788,7 @@ const ProfileScreen = ({ navigation, route }) => {
             </View>
             <View style={styles.importProgressButtonRow}>
               <View style={styles.importProgressSpinnerBox}>
-                <ActivityIndicator size="small" color="#007AFF" />
+                <ActivityIndicator size="small" color={colors.accent} />
               </View>
             </View>
           </View>
@@ -760,20 +801,23 @@ const ProfileScreen = ({ navigation, route }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.bg,
     paddingTop: 60,
   },
   header: {
-    backgroundColor: '#e0e0e0',
-    padding: 16,
+    backgroundColor: colors.bgSecondary,
+    paddingTop: 4,
+    paddingBottom: 6,
+    paddingHorizontal: 16,
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-    marginTop: 10,
+    borderBottomColor: colors.border,
+    marginTop: 4,
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '600',
   },
   content: {
     flex: 1,
@@ -781,14 +825,14 @@ const styles = StyleSheet.create({
   userInfoContainer: {
     alignItems: 'center',
     paddingVertical: 32,
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     marginBottom: 16,
   },
   avatarContainer: {
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 16,
@@ -796,7 +840,7 @@ const styles = StyleSheet.create({
   avatarText: {
     fontSize: 32,
     fontWeight: 'bold',
-    color: 'white',
+    color: colors.textInverse,
   },
   username: {
     fontSize: 18,
@@ -805,10 +849,11 @@ const styles = StyleSheet.create({
   },
   role: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
   },
   menuContainer: {
-    backgroundColor: 'white',
+    backgroundColor: 'transparent',   // 容器变透明, 5 个 menuItem 各自成独立圆角标签
+    paddingTop: 12,                   // 与 header 之间留 12px 间距 (避免紧贴)
   },
   menuItem: {
     flexDirection: 'row',
@@ -816,28 +861,37 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 16,
     paddingHorizontal: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    marginHorizontal: 16,             // 标签与屏幕边距
+    marginBottom: 12,                 // 标签之间留 12px 空白
+    backgroundColor: colors.bgSecondary,
+    borderRadius: 28,                 // pill 形圆角标签, 与底栏一致
+    // 去掉 borderBottomWidth, 改用 box-shadow + elevation 上浮
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.14,
+    shadowRadius: 12,
+    elevation: 7,
+    overflow: 'hidden',               // 圆角 + overflow 防止内容溢出
   },
   lastMenuItem: {
-    borderBottomWidth: 0,
+    marginBottom: 16,                 // 最后一个标签底部多一点空白 (视觉收尾)
   },
   menuText: {
     fontSize: 16,
   },
   menuArrow: {
     fontSize: 20,
-    color: '#999',
+    color: colors.textMuted,
   },
   // 模态框样式
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: colors.bgOverlay,
     justifyContent: 'center',
     alignItems: 'center',
   },
   modalContent: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     padding: 20,
     width: '85%',
@@ -856,7 +910,7 @@ const styles = StyleSheet.create({
   },
   modalCloseButtonText: {
     fontSize: 28,
-    color: '#999',
+    color: colors.textMuted,
     fontWeight: '300',
     lineHeight: 30,
   },
@@ -873,7 +927,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
     marginBottom: 8,
-    color: '#333',
+    color: colors.textPrimary,
   },
   modalButtons: {
     flexDirection: 'row',
@@ -883,38 +937,38 @@ const styles = StyleSheet.create({
   modalButton: {
     flex: 1,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
   },
   cancelButton: {
-    backgroundColor: '#8E8E93',
+    backgroundColor: colors.textMuted,
     marginRight: 8,
   },
   submitButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
     marginLeft: 8,
   },
   cancelButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
   submitButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
   fileNameInput: {
-    backgroundColor: '#f5f5f5',
+    backgroundColor: colors.bgElevated,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.border,
     padding: 12,
     fontSize: 16,
   },
   fileNameHint: {
     fontSize: 12,
-    color: '#999',
+    color: colors.textMuted,
     marginTop: 8,
     marginBottom: 4,
   },
@@ -928,65 +982,65 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: colors.borderLight,
   },
   shelfCheckbox: {
     width: 22,
     height: 22,
     borderRadius: 4,
     borderWidth: 2,
-    borderColor: '#ccc',
+    borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
   },
   shelfCheckboxChecked: {
-    backgroundColor: '#1976d2',
-    borderColor: '#1976d2',
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
   shelfCheckboxTick: {
-    color: '#fff',
+    color: colors.textInverse,
     fontSize: 14,
     fontWeight: '700',
   },
   shelfRowName: {
     fontSize: 15,
-    color: '#333',
+    color: colors.textPrimary,
     flex: 1,
   },
   fileListBox: {
-    backgroundColor: '#e8f5e9',
+    backgroundColor: colors.successBg,
     borderRadius: 8,
     padding: 12,
     marginBottom: 16,
   },
   fileListItem: {
     fontSize: 13,
-    color: '#333',
+    color: colors.textPrimary,
     marginTop: 4,
   },
   fileListHint: {
     fontSize: 11,
-    color: '#666',
+    color: colors.textSecondary,
     marginTop: 8,
     fontStyle: 'italic',
   },
   // ===== 导出成功弹窗样式 =====
   successOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: colors.bgOverlay,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
   },
   successContent: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     padding: 20,
     width: '100%',
     maxWidth: 400,
     elevation: 8,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15,
     shadowRadius: 12,
@@ -999,33 +1053,33 @@ const styles = StyleSheet.create({
   },
   successIcon: {
     fontSize: 24,
-    color: '#007AFF',
+    color: colors.accent,
     fontWeight: 'bold',
     marginRight: 8,
   },
   successTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#333',
+    color: colors.textPrimary,
   },
   infoBox: {
-    backgroundColor: '#f5f5f7',
+    backgroundColor: colors.bgElevated,
     borderRadius: 8,
     padding: 10,
     marginBottom: 8,
   },
   infoLabel: {
     fontSize: 12,
-    color: '#999',
+    color: colors.textMuted,
     marginBottom: 4,
   },
   infoValue: {
     fontSize: 13,
-    color: '#333',
+    color: colors.textPrimary,
     lineHeight: 18,
   },
   pathBox: {
-    backgroundColor: '#e8f0fe',
+    backgroundColor: colors.accentBg,
     borderRadius: 8,
     padding: 10,
     marginTop: 4,
@@ -1039,13 +1093,13 @@ const styles = StyleSheet.create({
   pathValue: {
     flex: 1,
     fontSize: 13,
-    color: '#1976d2',
+    color: colors.accent,
     fontWeight: '500',
     marginRight: 8,
     lineHeight: 18,
   },
   copyButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 6,
@@ -1053,28 +1107,28 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   copyButtonDone: {
-    backgroundColor: '#2e7d32',
+    backgroundColor: colors.success,
   },
   copyButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 13,
     fontWeight: '600',
   },
   successTip: {
     fontSize: 12,
-    color: '#666',
+    color: colors.textSecondary,
     lineHeight: 18,
     marginBottom: 16,
   },
   successOkButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
     flex: 1,
   },
   successOkButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -1085,29 +1139,29 @@ const styles = StyleSheet.create({
   successActionButton: {
     flex: 1,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
     justifyContent: 'center',
   },
   shareButton: {
-    backgroundColor: '#34c759',
+    backgroundColor: colors.success,
     marginRight: 8,
   },
   shareButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
   // 1.6.3: 导入进度弹窗样式
   importProgressOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: colors.bgOverlay,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
   },
   importProgressContent: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     padding: 20,
     width: '100%',
@@ -1120,19 +1174,19 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   importProgressFileBox: {
-    backgroundColor: '#f8f9fa',
+    backgroundColor: colors.bgElevated,
     borderRadius: 8,
     padding: 12,
     marginBottom: 12,
   },
   importProgressFileLabel: {
     fontSize: 12,
-    color: '#6c757d',
+    color: colors.textSecondary,
     marginBottom: 4,
   },
   importProgressFileName: {
     fontSize: 14,
-    color: '#212529',
+    color: colors.textPrimary,
     fontWeight: '500',
   },
   // 1.6.7: 进度区域 - 透明背景 (用弹窗白底), 不再用浅蓝色淹没进度条
@@ -1148,19 +1202,19 @@ const styles = StyleSheet.create({
   },
   importProgressStatusText: {
     fontSize: 14,
-    color: '#495057',
+    color: colors.textSecondary,
     fontWeight: '500',
     flexShrink: 1,
   },
   importProgressDeviceCount: {
     fontSize: 13,
-    color: '#6c757d',
+    color: colors.textSecondary,
     marginTop: 8,
   },
   // 1.6.7: 文字进度条样式 - 用 Unicode 方块字符, 不用 View
   importProgressBarText: {
     fontSize: 16,
-    color: '#007AFF',
+    color: colors.accent,
     fontFamily: 'monospace',
     letterSpacing: 1,
     marginTop: 6,
@@ -1169,20 +1223,20 @@ const styles = StyleSheet.create({
   // 进度条可视化 - View 实现 (track + fill), 不复用旧的 Unicode 文字方块版本
   importProgressBarTrack: {
     height: 8,
-    backgroundColor: '#e9ecef',
+    backgroundColor: colors.bgElevated,
     borderRadius: 4,
     overflow: 'hidden',
     marginBottom: 6,
   },
   importProgressBarFill: {
     height: '100%',
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
     borderRadius: 4,
   },
   // 1.6.7: 百分比文字 - 大号加粗, 右对齐
   importProgressPercentText: {
     fontSize: 18,
-    color: '#007AFF',
+    color: colors.accent,
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
     marginLeft: 8,
@@ -1193,15 +1247,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   importProgressCancelButton: {
-    backgroundColor: '#e9ecef',
+    backgroundColor: colors.bgElevated,
     paddingVertical: 10,
     paddingHorizontal: 24,
-    borderRadius: 8,
+    borderRadius: 28,
     minWidth: 100,
     alignItems: 'center',
   },
   importProgressCancelButtonText: {
-    color: '#495057',
+    color: colors.textSecondary,
     fontSize: 15,
     fontWeight: '500',
   },

@@ -33,6 +33,9 @@ import {
   removeLitDevice,
   clearAllLitDevices,
 } from '../utils/lightStatusStore';
+import colors from '../theme/colors';
+import InsetShadow from '../components/InsetShadow';
+import NeuSearchShadow from '../components/NeuSearchShadow';
 
 const BOMScreen = ({ navigation, isAdmin = false }) => {
   console.log('BOMScreen received isAdmin:', isAdmin);
@@ -1024,6 +1027,9 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
         current: pendingComponent.current || '',
         power: pendingComponent.power || '',
         frequency: pendingComponent.frequency || '',
+        // 修复: 从 BOM 继承数量, 否则库存页打开器件的"当前库存"会显示 0
+        // pendingComponent.quantity 来自 Excel 数量列 (字符串), parseInt 兜底非数字时回到 1
+        quantity: parseInt(pendingComponent.quantity, 10) || 1,
         shelfId: currentShelfId, // 修复: 上架到当前选中库存, 而不是写死 '1'
         location: String(position),
       };
@@ -1149,23 +1155,12 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
   // ==================== 界面渲染 ====================
 
-  // 0 库存时顶部小黄条提示, 不阻挡用户操作
-  const EmptyShelfBanner = !hasShelves ? (
-    <View style={styles.bomEmptyShelfBanner}>
-      <Text style={styles.bomEmptyShelfBannerText}>
-        ⚠️ 当前无库存 — 导入 BOM 后无法与器件匹配, 请先到"设置"新建或导入库存
-      </Text>
-    </View>
-  ) : null;
-
   return (
     <SafeAreaView style={styles.container}>
       {/* 页面标题栏 */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>BOM 匹配</Text>
       </View>
-
-      {EmptyShelfBanner}
 
       <ScrollView style={styles.content}>
         <View style={styles.componentsList}>
@@ -1198,12 +1193,14 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 
           {/* 搜索输入框 */}
           <View style={styles.searchInputContainer}>
-            <TextInput
-              style={styles.searchInput}
-              placeholder="搜索器件..."
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-            />
+            <NeuSearchShadow borderRadius={28} inset={3} backgroundColor={colors.bg}>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="搜索器件..."
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+            </NeuSearchShadow>
           </View>
 
           {filteredComponents.length > 0 && (
@@ -1216,17 +1213,20 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                 const anyLit = matchInfo.devices.some(d => litDeviceIds.includes(d.id));
 
                 // 根据亮灯状态设置背景色和文字颜色
+                // 亮灯态 (allLit/anyLit) 用 colors.litColor 实色 + 白字, 与库存首页点亮标签一致
                 let bgColor, textColor;
                 if (allLit) {
-                  bgColor = '#e8f5e9';    // 全部亮灯：绿色背景
-                  textColor = '#2e7d32';
+                  bgColor = colors.litColor;     // 全部亮灯：实色亮薄荷绿 + 白字
+                  textColor = colors.positionOccupiedText;
                 } else if (anyLit) {
-                  bgColor = '#fff8e1';    // 部分亮灯：黄色背景
-                  textColor = '#f57f17';
+                  bgColor = colors.litColor;     // 部分亮灯：实色亮薄荷绿 + 白字
+                  textColor = colors.positionOccupiedText;
                 } else {
-                  bgColor = '#ffffff';    // 未亮灯：白色背景
-                  textColor = '#333';
+                  bgColor = colors.bgSecondary;    // 未亮灯：浅灰背景
+                  textColor = colors.textPrimary;
                 }
+                // 亮灯态时, 器件名称从薄荷绿 → 白色 (避免与同色背景融合看不清)
+                const nameColor = (allLit || anyLit) ? colors.positionOccupiedText : colors.accent;
 
                 // 拼接所有匹配器件的位置文本
                 const positionsText = matchInfo.devices
@@ -1262,7 +1262,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                           <Text style={styles.valueText}>{component.supplierId || 'null'}</Text>
                         </View>
                         <View style={styles.rowItem}>
-                          <Text style={[styles.valueText, { color: '#1976d2', fontWeight: 'bold', fontSize: 16 }]}>{component.name || 'null'}</Text>
+                          <Text style={[styles.valueText, { color: nameColor, fontWeight: 'bold', fontSize: 16 }]}>{component.name || 'null'}</Text>
                         </View>
                       </View>
                       {/* 类目（名称下方，过长省略） */}
@@ -1302,7 +1302,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                     key={compIndex}
                     style={[
                       styles.componentItem,
-                      { backgroundColor: '#fff3e0' },
+                      { backgroundColor: colors.warningBg },
                     ]}
                   >
                     {/* 序号圆圈 */}
@@ -1317,7 +1317,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
                           <Text style={styles.valueText}>{component.supplierId || 'null'}</Text>
                         </View>
                         <View style={styles.rowItem}>
-                          <Text style={[styles.valueText, { color: '#1976d2', fontWeight: 'bold', fontSize: 16 }]}>{component.name || 'null'}</Text>
+                          <Text style={[styles.valueText, { color: colors.accent, fontWeight: 'bold', fontSize: 16 }]}>{component.name || 'null'}</Text>
                         </View>
                       </View>
                       {/* 类目（名称下方，过长省略） */}
@@ -1361,25 +1361,7 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
         {/* 0 器件空状态: 之前切库后页面"啥都没有", 用户以为卡了 */}
         {filteredComponents.length === 0 && components.length === 0 && (
           <View style={styles.bomEmptyState}>
-            <Text style={styles.bomEmptyStateIcon}>📋</Text>
             <Text style={styles.bomEmptyStateTitle}>暂无 BOM 匹配</Text>
-            <Text style={styles.bomEmptyStateText}>
-              {hasShelves
-                ? '点击右上角"导入"按钮, 选择 BOM 表格开始匹配'
-                : '请先到"设置"新建或导入库存, 再导入 BOM 表格'}
-            </Text>
-            {hasShelves && (
-              <TouchableOpacity
-                style={styles.bomEmptyStateButton}
-                onPress={handleImportBOM}
-                disabled={isImporting}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.bomEmptyStateButtonText}>
-                  {isImporting ? '导入中...' : '导入 BOM 表格'}
-                </Text>
-              </TouchableOpacity>
-            )}
           </View>
         )}
         {/* 搜索无结果: 列表有数据但搜索没匹配 */}
@@ -1509,26 +1491,28 @@ const BOMScreen = ({ navigation, isAdmin = false }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.bg,
     paddingTop: 60,
   },
   header: {
-    backgroundColor: '#e0e0e0',
-    padding: 16,
+    backgroundColor: colors.bgSecondary,
+    paddingTop: 4,
+    paddingBottom: 6,
+    paddingHorizontal: 16,
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-    marginTop: 10,
+    borderBottomColor: colors.border,
+    marginTop: 4,
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '600',
+    color: colors.textPrimary,
   },
   // ========== 0 库存小黄条样式 (提示但不阻挡操作) ==========
   bomEmptyShelfBanner: {
-    backgroundColor: '#fff3cd',
-    borderLeftWidth: 4,
-    borderLeftColor: '#ff9800',
+    backgroundColor: colors.warningBg,
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginHorizontal: 12,
@@ -1536,7 +1520,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   bomEmptyShelfBannerText: {
-    color: '#856404',
+    color: colors.warning,
     fontSize: 13,
     lineHeight: 18,
   },
@@ -1552,26 +1536,25 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   bomEmptyStateTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#333',
+    fontSize: 14,
+    color: colors.textSecondary,
     marginBottom: 8,
   },
   bomEmptyStateText: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: 24,
   },
   bomEmptyStateButton: {
-    backgroundColor: '#ff9800',
+    backgroundColor: colors.accent,
     paddingHorizontal: 28,
     paddingVertical: 12,
-    borderRadius: 24,
+    borderRadius: 28,
   },
   bomEmptyStateButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 15,
     fontWeight: '600',
   },
@@ -1582,6 +1565,7 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 16,
     fontWeight: 'bold',
+    color: colors.textPrimary,
   },
   // 标题栏：器件列表 + 右上角「清空」「导入」按钮
   listHeader: {
@@ -1597,32 +1581,32 @@ const styles = StyleSheet.create({
   },
   // 标题栏右侧的「清空」按钮 (蓝色, 紧凑尺寸, 在「导入」左侧)
   clearButtonTop: {
-    backgroundColor: '#2196f3',
+    backgroundColor: colors.accent,
     paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 6,
+    borderRadius: 28,
     minWidth: 50,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 8,
   },
   clearButtonText: {
-    color: '#fff',
+    color: colors.textInverse,
     fontSize: 13,
     fontWeight: '600',
   },
-  // 标题栏右侧的「导入」按钮（橘色，紧凑尺寸）
+  // 标题栏右侧的「导入」按钮（蓝色，紧凑尺寸）
   importButtonTop: {
-    backgroundColor: '#ff9800',
+    backgroundColor: colors.accent,
     paddingHorizontal: 16,
     paddingVertical: 6,
-    borderRadius: 6,
+    borderRadius: 28,
     minWidth: 60,
     alignItems: 'center',
     justifyContent: 'center',
   },
   importButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 14,
     fontWeight: 'bold',
   },
@@ -1634,11 +1618,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     padding: 12,
-    borderRadius: 8,
+    borderRadius: 28,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.border,
     marginBottom: 8,
   },
   /* 序号圆圈 */
@@ -1646,7 +1630,7 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: '#e0e0e0',
+    backgroundColor: colors.bgSecondary,
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 10,
@@ -1654,7 +1638,7 @@ const styles = StyleSheet.create({
   seqText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#555',
+    color: colors.textSecondary,
   },
   componentText: {
     fontSize: 16,
@@ -1673,19 +1657,19 @@ const styles = StyleSheet.create({
   /* 标签文字（如"编号:"、"名称:"） */
   labelText: {
     fontSize: 12,
-    color: '#888',
+    color: colors.textMuted,
     marginRight: 4,
   },
   /* 值文字（如具体编号、名称值） */
   valueText: {
     fontSize: 13,
-    color: '#333',
+    color: colors.textPrimary,
     fontWeight: '500',
   },
   /* 器件信息行（封装、位号等） */
   deviceInfo: {
     fontSize: 12,
-    color: '#666',
+    color: colors.textSecondary,
     marginTop: 4,
   },
   /* 状态文字（位置、亮灯状态等） */
@@ -1705,43 +1689,43 @@ const styles = StyleSheet.create({
   quantityText: {
     fontSize: 12,
     fontWeight: '500',
-    color: '#1976d2',
+    color: colors.accent,
   },
   /* 空列表提示文字 */
   emptyText: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
     textAlign: 'center',
     padding: 20,
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.border,
     borderStyle: 'dashed',
   },
   /* 上架按钮（蓝色） */
   shelfButton: {
-    backgroundColor: '#1976d2',
+    backgroundColor: colors.accent,
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 6,
+    borderRadius: 28,
     marginLeft: 8,
     alignSelf: 'center',
   },
   shelfButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 14,
     fontWeight: '600',
   },
   /* ===== 位置选择弹窗样式 ===== */
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: colors.bgOverlay,
     justifyContent: 'center',
     alignItems: 'center',
   },
   modalContent: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     padding: 20,
     width: '85%',
@@ -1755,7 +1739,7 @@ const styles = StyleSheet.create({
   },
   modalSubtitle: {
     fontSize: 14,
-    color: '#666',
+    color: colors.textSecondary,
     textAlign: 'center',
     marginBottom: 16,
   },
@@ -1767,7 +1751,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.bg,
     paddingVertical: 10,
     paddingHorizontal: 12,
     borderRadius: 6,
@@ -1777,11 +1761,11 @@ const styles = StyleSheet.create({
   positionBankHeaderText: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#333',
+    color: colors.textPrimary,
   },
   positionBankHeaderArrow: {
     fontSize: 12,
-    color: '#666',
+    color: colors.textSecondary,
   },
   /* 位置格子容器 */
   positionGridInner: {
@@ -1800,42 +1784,49 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     borderWidth: 1,
   },
-  /* 空位置（蓝色） */
+  /* 空位置（浅薄荷绿底, 无边框） */
   positionItemEmpty: {
-    backgroundColor: '#e3f2fd',
-    borderColor: '#bbdefb',
+    backgroundColor: colors.accentBg,
+    borderWidth: 0,                              // 彻底无边框
   },
-  /* 已占用位置（绿色） */
+  /* 已占用位置（浅薄荷绿底, 薄荷绿边框） */
   positionItemOccupied: {
-    backgroundColor: '#e8f5e9',
-    borderColor: '#a5d6a7',
+    backgroundColor: colors.accent,              // 实色薄荷绿填满 (边框色)
+    borderColor: colors.accent,                  // 同色边框
+    borderWidth: 0,                              // 边框与背景同色时无需 1px 边
+  },
+  /* 当前选中位置（暖橘色系） */
+  positionItemCurrent: {
+    backgroundColor: colors.warningBg,
+    borderColor: colors.warning,
+    borderWidth: 2,
   },
   positionItemText: {
     fontSize: 16,
     fontWeight: '600',
   },
   positionItemTextEmpty: {
-    color: '#1976d2',
+    color: colors.accent,
   },
   positionItemTextOccupied: {
-    color: '#2e7d32',
+    color: colors.positionOccupiedText,          // 白字 (与 NewDeviceScreen 统一)
   },
   /* 已占用位置下方显示的器件名称 */
   positionItemDeviceName: {
     fontSize: 8,
-    color: '#4caf50',
+    color: colors.success,
     marginTop: 1,
   },
   /* 弹窗取消按钮 */
   modalCancelButton: {
     marginTop: 16,
     paddingVertical: 12,
-    borderRadius: 8,
-    backgroundColor: '#8E8E93',
+    borderRadius: 28,
+    backgroundColor: colors.textMuted,
     alignItems: 'center',
   },
   modalCancelButtonText: {
-    color: 'white',
+    color: colors.textInverse,
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -1844,13 +1835,12 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   searchInput: {
-    backgroundColor: 'white',
+    // 透明背景, 透出 InsetShadow 容器的 bgElevated 凹槽背景
+    backgroundColor: 'transparent',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ddd',
     fontSize: 16,
+    color: colors.textPrimary,
   },
 });
 

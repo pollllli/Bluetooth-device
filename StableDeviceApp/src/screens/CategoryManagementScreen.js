@@ -27,6 +27,7 @@ import {
 } from '../services/DeviceCategoryService';
 import { logError, formatErrorMessage } from '../utils/ErrorHandler';
 import { Feather } from '@expo/vector-icons';
+import colors from '../theme/colors';
 
 /**
  * 分类管理页面组件
@@ -390,14 +391,14 @@ const CategoryManagementScreen = ({ navigation }) => {
                       onPress={() => handleOpenRenameBig(cat.name)}
                       hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     >
-                      <Feather name="edit-2" size={18} color="#999" />
+                      <Feather name="edit-2" size={18} color={colors.textMuted} />
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.iconButton}
                       onPress={() => handleDeleteBig(cat.name)}
                       hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     >
-                      <Feather name="trash-2" size={18} color="#999" />
+                      <Feather name="trash-2" size={18} color={colors.textMuted} />
                     </TouchableOpacity>
                   </View>
                 )}
@@ -432,14 +433,14 @@ const CategoryManagementScreen = ({ navigation }) => {
                                 onPress={() => handleOpenRenameSub(cat.name, sub)}
                                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                               >
-                                <Feather name="edit-2" size={16} color="#999" />
+                                <Feather name="edit-2" size={16} color={colors.textMuted} />
                               </TouchableOpacity>
                               <TouchableOpacity
                                 style={styles.smallIconButton}
                                 onPress={() => handleDeleteSub(cat.name, sub)}
                                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                               >
-                                <Feather name="trash-2" size={16} color="#999" />
+                                <Feather name="trash-2" size={16} color={colors.textMuted} />
                               </TouchableOpacity>
                             </View>
                           )}
@@ -464,14 +465,6 @@ const CategoryManagementScreen = ({ navigation }) => {
         <TouchableOpacity style={styles.resetButton} onPress={handleReset}>
           <Text style={styles.resetButtonText}>重置为默认类目</Text>
         </TouchableOpacity>
-
-        {/* 导出提示 */}
-        <View style={styles.exportHintContainer}>
-          <Text style={styles.exportHintText}>
-            提示：在"我的" → "数据导出"可将本机自定义的类目连同器件列表一并导出，
-            另一台手机导入后即可直接使用，无需重新增删分类。
-          </Text>
-        </View>
 
         <View style={{ height: 100 }} />
       </ScrollView>
@@ -688,27 +681,27 @@ const CategoryManagementScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: colors.bg,
   },
   content: {
     flex: 1,
   },
   headerInfo: {
-    backgroundColor: '#fff',
+    backgroundColor: colors.bgSecondary,
     padding: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: colors.border,
   },
   headerInfoText: {
     fontSize: 13,
-    color: '#666',
+    color: colors.textSecondary,
   },
   categoryBlock: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     marginTop: 8,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: '#eee',
+    borderColor: colors.border,
   },
   categoryHeader: {
     flexDirection: 'row',
@@ -724,29 +717,29 @@ const styles = StyleSheet.create({
   },
   categoryHeaderArrow: {
     fontSize: 14,
-    color: '#999',
+    color: colors.textMuted,
     width: 20,
   },
   categoryHeaderName: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
+    color: colors.textPrimary,
     flexShrink: 1,
   },
   categoryHeaderCount: {
     fontSize: 13,
-    color: '#999',
+    color: colors.textMuted,
     marginLeft: 6,
   },
   deleteBigButton: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: colors.danger,
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 6,
+    borderRadius: 28,
     marginLeft: 8,
   },
   deleteBigButtonText: {
-    color: 'white',
+    color: '#fff',
     fontSize: 12,
     fontWeight: '500',
   },
@@ -779,16 +772,16 @@ const styles = StyleSheet.create({
   },
   // 编辑按钮：蓝色
   editButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
   },
   editButtonText: {
-    color: 'white',
+    color: '#fff',
     fontSize: 12,
     fontWeight: '500',
   },
   // 垃圾桶按钮：红色
   trashButton: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: colors.danger,
   },
   trashButtonText: {
     fontSize: 14,
@@ -797,7 +790,7 @@ const styles = StyleSheet.create({
   defaultBadge: {
     fontSize: 11,
     color: '#fff',
-    backgroundColor: '#999',
+    backgroundColor: colors.textMuted,
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -808,7 +801,7 @@ const styles = StyleSheet.create({
   defaultSubBadge: {
     fontSize: 10,
     color: '#fff',
-    backgroundColor: '#999',
+    backgroundColor: colors.textMuted,
     paddingHorizontal: 5,
     paddingVertical: 1,
     borderRadius: 3,
@@ -824,9 +817,9 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   subCategoryList: {
-    backgroundColor: '#fafafa',
+    backgroundColor: colors.bgElevated,
     borderTopWidth: 1,
-    borderTopColor: '#eee',
+    borderTopColor: colors.border,
     paddingVertical: 6,
   },
   subCategoryItem: {
@@ -836,27 +829,27 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 36,
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderBottomColor: colors.border,
   },
   subCategoryItemText: {
     fontSize: 14,
-    color: '#333',
+    color: colors.textPrimary,
     flex: 1,
     marginRight: 8,
   },
   deleteSubButton: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: colors.danger,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 4,
+    borderRadius: 28,
   },
   deleteSubButtonText: {
-    color: 'white',
+    color: '#fff',
     fontSize: 12,
   },
   emptySubText: {
     fontSize: 13,
-    color: '#999',
+    color: colors.textMuted,
     paddingHorizontal: 36,
     paddingVertical: 12,
     fontStyle: 'italic',
@@ -869,37 +862,23 @@ const styles = StyleSheet.create({
   },
   addSubButtonText: {
     fontSize: 14,
-    color: '#007AFF',
+    color: colors.accent,
     fontWeight: '500',
   },
   resetButton: {
     marginTop: 16,
     marginHorizontal: 16,
     paddingVertical: 12,
-    backgroundColor: '#fff',
-    borderRadius: 8,
+    backgroundColor: colors.bgSecondary,
+    borderRadius: 28,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.border,
   },
   resetButtonText: {
     fontSize: 14,
-    color: '#FF9500',
+    color: colors.warning,
     fontWeight: '500',
-  },
-  exportHintContainer: {
-    marginTop: 16,
-    marginHorizontal: 16,
-    padding: 12,
-    backgroundColor: '#E3F2FD',
-    borderRadius: 8,
-    borderLeftWidth: 3,
-    borderLeftColor: '#1976d2',
-  },
-  exportHintText: {
-    fontSize: 12,
-    color: '#1976d2',
-    lineHeight: 18,
   },
   bottomBar: {
     position: 'absolute',
@@ -907,18 +886,18 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     padding: 16,
-    backgroundColor: 'rgba(255,255,255,0.95)',
+    backgroundColor: colors.bgSecondary,
     borderTopWidth: 1,
-    borderTopColor: '#eee',
+    borderTopColor: colors.border,
   },
   addBigFab: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
   },
   addBigFabText: {
-    color: 'white',
+    color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
   },
@@ -945,7 +924,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: colors.bgOverlay,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 24,
@@ -959,7 +938,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   modalContent: {
-    backgroundColor: 'white',
+    backgroundColor: colors.bgSecondary,
     borderRadius: 12,
     padding: 20,
     width: '85%',
@@ -969,7 +948,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     // 固定 elevation 阴影，避免某些机型（特别是 OPPO/Vivo）在动画过程中阴影重绘造成的"抽搐"
     elevation: 8,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15,
     shadowRadius: 8,
@@ -979,6 +958,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
     marginBottom: 20,
+    color: colors.textPrimary,
   },
   inputContainer: {
     marginBottom: 16,
@@ -987,7 +967,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
     marginBottom: 8,
-    color: '#333',
+    color: colors.textPrimary,
   },
   modalButtons: {
     flexDirection: 'row',
@@ -997,34 +977,35 @@ const styles = StyleSheet.create({
   modalButton: {
     flex: 1,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 28,
     alignItems: 'center',
   },
   cancelButton: {
-    backgroundColor: '#8E8E93',
+    backgroundColor: colors.textMuted,
     marginRight: 8,
   },
   submitButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.accent,
     marginLeft: 8,
   },
   cancelButtonText: {
-    color: 'white',
+    color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
   },
   submitButtonText: {
-    color: 'white',
+    color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
   },
   fileNameInput: {
-    backgroundColor: '#f5f5f5',
+    backgroundColor: colors.bgElevated,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.border,
     padding: 12,
     fontSize: 16,
+    color: colors.textPrimary,
   },
 });
 
